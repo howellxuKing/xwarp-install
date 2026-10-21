@@ -14,12 +14,30 @@ from urllib.request import ProxyHandler, build_opener
 from gateway import domain, port, render
 
 
-def print_panel_entry(url):
-    """Keep the URL on its own line and emphasize it in interactive SSH terminals."""
+def print_highlight(line):
+    """Use bold bright red without emitting terminal escapes into redirected output."""
     color = sys.stdout.isatty() and os.environ.get("TERM") != "dumb" and "NO_COLOR" not in os.environ
-    for line in ["", "=" * 64, "完整面板登录入口（请复制并收藏整行）：", "", url, "", "=" * 64, ""]:
-        print("\033[1;91m" + line + "\033[0m" if color and line else line)
-    print("入口包含访问密钥，请妥善保存；不要复制浏览器跳转后的地址。" if "_entry?" in url else "请保存此登录地址。")
+    print("\033[1;91m" + line + "\033[0m" if color and line else line)
+
+
+def print_panel_entry(url):
+    """Keep the copyable URL separate from the prominent save reminder."""
+    for line in ["", "=" * 64, "【重要】请立即保存完整登录地址、账号和密码！", "=" * 64,
+                 "", "完整面板登录入口（请复制并收藏整行）：", "", url, "", "=" * 64, ""]:
+        print_highlight(line)
+    if "_entry?" in url:
+        print("入口包含访问密钥，请妥善保存；不要复制浏览器跳转后的地址。")
+
+
+def print_credentials(lines):
+    initial = [line for line in lines if line.startswith(("初始管理员账号：", "初始登录密码："))]
+    if initial:
+        for line in ["", "=" * 64, "【首次登录信息】请立即复制保存！", "", *initial, "", "=" * 64, ""]:
+            print_highlight(line)
+    for line in lines:
+        if line not in initial:
+            print(line)
+    print_highlight("【保存提醒】请将登录地址、账号和密码保存到密码管理器，勿公开分享。")
 
 
 def legacy_entry_url(config_file):
@@ -95,7 +113,7 @@ def main():
         parser.exit(1, "Unable to read the complete panel entry: " + str(error) + "\n")
     if url:
         print_panel_entry(url)
-    print("\n".join(credentials))
+    print_credentials(credentials)
 
 
 if __name__ == "__main__":
