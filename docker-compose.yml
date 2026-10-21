@@ -7,7 +7,7 @@ services:
     restart: always
     network_mode: host
     volumes:
-      - "/tpdata/caddy/config.json:/tpdata/caddy/config.json"
+      - "/tpdata/caddy/:/tpdata/caddy/"
       - "/tpdata/cert/:/tpdata/cert/certificates/acme-v02.api.letsencrypt.org-directory/${domain}/"
       - "/tpdata/web/:/tpdata/web/"
       - "/tpdata/caddy/logs/:/tpdata/caddy/logs/"
@@ -22,17 +22,17 @@ services:
       MYSQL_DATABASE: trojan_panel_db
       MYSQL_ROOT_PASSWORD: "${mariadb_pas}"
       TZ: Asia/Shanghai
-    command: --port=9507
+    command: --port=9507 --bind-address=${XWARP_MARIADB_BIND:-127.0.0.1}
 
   trojan-panel-redis:
     image: redis:6.2.7
     container_name: trojan-panel-redis
     restart: always
     network_mode: host
-    command: redis-server --requirepass ${redis_pass} --port 6378
+    command: redis-server --bind ${XWARP_REDIS_BIND:-127.0.0.1} --protected-mode yes --requirepass ${redis_pass} --port 6378
 
   trojan-panel:
-    image: ghcr.io/howellxuking/xwarp
+    image: ${XWARP_BACKEND_IMAGE:?Provide a reviewed backend repository@sha256 digest}
     container_name: trojan-panel
     restart: always
     network_mode: host
@@ -53,16 +53,17 @@ services:
       - "server_port=8081"
 
   trojan-panel-ui:
-    image: ghcr.io/howellxuking/xwarp-ui
+    image: ${XWARP_UI_IMAGE:?Provide a reviewed UI repository@sha256 digest}
     container_name: trojan-panel-ui
     restart: always
     network_mode: host
     volumes:
-      - "/tpdata/trojan-panel-ui/nginx/default.conf:/etc/nginx/conf.d/default.conf"
+      - "/tpdata/trojan-panel-ui/nginx/:/etc/nginx/conf.d/"
+      - "/tpdata/web/:/tpdata/web/:ro"
       - "/tpdata/cert/:/tpdata/cert/"
 
   trojan-panel-core:
-    image: jonssonyan/trojan-panel-core
+    image: ${XWARP_CORE_IMAGE:?Provide a reviewed core repository@sha256 digest}
     container_name: trojan-panel-core
     restart: always
     network_mode: host

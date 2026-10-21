@@ -1,0 +1,10 @@
+[Unit]
+Description=Check XWarp managed certificates daily
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=1day
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,8 @@
+[Unit]
+Description=XWarp local health and certificate inspection
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/xwarp-install/tools/diagnostics.py --monitor
+UMask=0077

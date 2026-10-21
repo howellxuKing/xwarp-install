@@ -1,0 +1,16 @@
+[Unit]
+Description=XWarp optional HTTPS panel IP authorization
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/xwarp-install/tools/knock.py --apply
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

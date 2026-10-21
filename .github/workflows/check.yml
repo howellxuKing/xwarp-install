@@ -1,0 +1,37 @@
+name: release-installer-check
+on:
+  push:
+    branches: [main, 'codex/public-release-*']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax and installation command checks
+        run: |
+          bash -n install_script.sh
+          bash -n bootstrap.sh
+          bash tests/install-security.sh
+      - name: Backup and access-control regression checks
+        run: python3 -m unittest discover -s tests -p "test_*.py" -v
+      - name: Isolated HTTPS gateway acceptance
+        run: python3 tests/gateway_acceptance.py
+      - name: Fresh HTTPS template acceptance
+        run: bash tests/fresh_https_acceptance.sh
+      - name: Isolated backup and restore acceptance
+        run: sudo env GITHUB_ACTIONS=true python3 tests/snapshot_acceptance.py
+      - name: Public bootstrap without authentication
+        run: sudo env GITHUB_ACTIONS=true bash tests/bootstrap_acceptance.sh
+      - name: Validate compose defaults
+        env:
+          mariadb_pas: test-password
+          redis_pass: test-password
+          domain: test.example
+          XWARP_BACKEND_IMAGE: ghcr.io/example/backend@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          XWARP_UI_IMAGE: ghcr.io/example/ui@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          XWARP_CORE_IMAGE: example/core@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+        run: docker compose config --quiet

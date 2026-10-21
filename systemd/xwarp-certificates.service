@@ -1,0 +1,8 @@
+[Unit]
+Description=Synchronize XWarp renewed certificates and reload nginx
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/xwarp-install/tools/certificates.py --apply
+UMask=0077

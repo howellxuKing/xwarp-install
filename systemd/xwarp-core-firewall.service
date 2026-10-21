@@ -1,0 +1,14 @@
+[Unit]
+Description=XWarp core management port policy
+After=local-fs.target
+Before=docker.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/xwarp-core-firewall.env
+ExecStart=/usr/bin/python3 /opt/xwarp-install/tools/firewall.py --apply $XWARP_CORE_FIREWALL_ARGS
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+RequiredBy=docker.service

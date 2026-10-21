@@ -1,78 +1,28 @@
-[English](README.md)
+# XWarp 公开稳定版
 
-<div align="center">
-<a href="https://github.com/trojanpanel"><img src="https://github.com/trojanpanel/install-script/assets/46235235/bfc4f96a-e8b6-499d-956f-a9c212059294" alt="Trojan Panel" width="150" /></a>
-<h1>Trojan Panel</h1>
-<p>
-<a href="https://github.com/trojanpanel/install-script/stargazers"><img src="https://img.shields.io/github/stars/trojanpanel/install-script" alt="GitHub stars"></a>
-<a href="https://github.com/trojanpanel/install-script/forks"><img src="https://img.shields.io/github/forks/trojanpanel/install-script" alt="GitHub forks"></a>
-<a href="https://github.com/trojanpanel/install-script/issues"><img src="https://img.shields.io/github/issues/trojanpanel/install-script" alt="GitHub issues"></a>
-<a href="https://github.com/trojanpanel/install-script/releases"><img src="https://img.shields.io/github/v/release/trojanpanel/install-script" alt="GitHub release"></a>
-<a href="https://hub.docker.com/r/jonssonyan/trojan-panel"><img src="https://img.shields.io/docker/pulls/jonssonyan/trojan-panel" alt="Docker pulls"></a>
-</p>
-<h3>支持Xray/Trojan-Go/Hysteria/NaiveProxy的多用户Web管理面板</h3>
-<a href="https://github.com/trojanpanel/install-script/assets/46235235/7ac2bba1-b442-442d-b48e-b52f92e0bad8"><img src="https://github.com/trojanpanel/install-script/assets/46235235/7ac2bba1-b442-442d-b48e-b52f92e0bad8" alt="Trojan Panel"/></a>
-</div>
+一条命令进入安装向导，不需要 GitHub 账号、Token、手动克隆仓库或 Docker 登录。
 
-## 特点
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/howellxuKing/xwarp-install/main/install_script.sh)
+```
 
-- 极速搭建: 一键安装脚本，降低部署门槛，快速搭建系统
-- 国际化: 系统语言支持中文/English/한국인/فارسی
-- 多代理支持: 节点类型支持Xray/Trojan-Go/Hysteria/NaiveProxy
-- 分布式: 前后端分离开发，减少模块之间耦合度，可以自由组合部署在多个服务器
-- 功能强大: 支持登录注册/用户管理/节点管理/邮件管理/黑名单管理/自定义伪装网站/系统看板等
-- 所见即所得: 支持多节点管理，自动化管理远程节点，自动化申请/续签证书，面板内编辑节点，远程服务实时修改节点配置
+在 Debian/Ubuntu x86_64 服务器的 root 终端运行。首次需要访问 GitHub、GHCR 和系统软件源；建议至少 1 GB 内存，安装前保留数据备份。
 
-## 系统要求
+## 安装与使用
 
-系统: CentOS 7+ / Ubuntu 18+ / Debian 10+
+- 新服务器按菜单 **2 后端 → 3 核心 → 1 前端** 安装，完成一个组件后可继续选择下一个。
+- 前端端口留空，由脚本自动从 **49152～65535** 选择空闲端口，安装后保持不变。
+- HTTPS 独立订阅和简洁入口使用菜单 **26**；填写域名及对应证书文件，面板端口留空、入口模式选 **1**，自动生成高位随机端口。订阅默认使用 443。
+- 安装后红色醒目区域显示完整登录地址。新安装显示初始管理员账号和随机密码；已有账号密码不会重置。请保存显示的地址和密码。
+- 云防火墙启用时，放行最终显示的面板 TCP 端口，以及实际节点需要的 TCP/UDP 端口。
+- 使用现有安装时，先备份再进入维护；菜单 **8/9** 分别升级前端/后端，菜单 **19** 修改面板端口，菜单 **22** 重置管理员密码。
+- 备份可能短暂停止节点；SSH 如果经由这些节点也可能断开。后台维护任务会继续，重连后检查任务日志，不要重复执行。
+- 同步公开版代码或升级不需要重置服务器。重装系统会删除原有数据，需另行备份。
 
-CPU: linux/amd64 / linux/arm/v6 / linux/arm/v7 / linux/arm64 / linux/s390x / linux/ppc64le / linux/386
+## 发布与开发
 
-内存: ≥ 1G
+后端：[xwarp](https://github.com/howellxuKing/xwarp)；前端：[xwarp-ui](https://github.com/howellxuKing/xwarp-ui)。安装使用 `release.json` 固定镜像摘要，公开镜像支持匿名拉取。
 
-## 安装
+后续开发继续在私有开发副本进行，检查通过后再同步此稳定版。公开仓库不包含真实服务器密码、入口密钥、数据库备份或证书私钥。
 
-- 联机（推荐）
-
-    ```shell
-    source <(curl -L https://github.com/trojanpanel/install-script/raw/main/install_script.sh)
-    ```
-
-- 单机
-
-    ```shell
-    source <(curl -L https://github.com/trojanpanel/install-script/raw/main/install_script_standalone.sh)
-    ```
-
-- [安装旧版本](README_ARCHIVE_ZH.md)
-
-## 其他
-
-Telegram Channel: https://t.me/jonssonyan_channel
-
-You can subscribe to my channel on YouTube: https://www.youtube.com/@jonssonyan
-
-## 文档
-
-访问 [https://trojanpanel.github.io](https://trojanpanel.github.io) 查看完整文档
-
-## 更新日志
-
-访问 [https://trojanpanel.github.io/change/change-log.html](https://trojanpanel.github.io/change/change-log.html) 查看完整日志
-
-## 报告缺陷与问题
-
-[Issues](https://github.com/trojanpanel/install-script/issues)
-
-## 致谢
-
-- [trojan](https://github.com/trojan-gfw/trojan)
-- [trojan-go](https://github.com/p4gefau1t/trojan-go)
-- [Xray-core](https://github.com/XTLS/Xray-core)
-- [hysteria](https://github.com/HyNetwork/hysteria)
-- [naiveproxy](https://github.com/klzgrad/naiveproxy)
-
-## Star随时间变化
-
-[![Stargazers over time](https://starchart.cc/trojanpanel/install-script.svg)](https://github.com/trojanpanel/install-script)
+本项目基于 [Trojan Panel 安装脚本](https://github.com/trojanpanel/install-script) 修改，保留原项目许可和致谢；历史文档保存在 `README_ARCHIVE*.md` 及 `archive/`，不适合作为当前安装指引。

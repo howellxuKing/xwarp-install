@@ -2,11 +2,173 @@
 PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:~/bin
 export PATH
 
-# System Required: CentOS 7+/Ubuntu 18+/Debian 10+
-# Version: v2.3.4
+# Keep the original one-command entry compatible, including source <(curl ...).
+if [[ "${XWARP_SOURCE_ONLY:-0}" != "1" ]]; then
+  if public_bootstrap=$(curl -fsSL --retry 3 https://raw.githubusercontent.com/howellxuKing/xwarp-install/main/bootstrap.sh) && [[ -n "$public_bootstrap" ]]; then
+    bash -c "$public_bootstrap"
+    public_result=$?
+  else
+    echo "无法下载安装入口，请检查服务器网络后重试。" >&2
+    public_result=1
+  fi
+  return "$public_result" 2>/dev/null || exit "$public_result"
+fi
+
+# Release tools: Debian/Ubuntu x86_64, Python 3, Docker, systemd
+# Version: v2.5.0
 # Description: One click Install XWarp server
 # Author: jonssonyan <https://jonssonyan.com>
 # Github: https://github.com/trojanpanel/install-script
+
+
+XWARP_INSTALL_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+normalize_menu_choice() {
+  local choice="$1"
+  choice="${choice//$'\r'/}"
+  choice="${choice//０/0}"; choice="${choice//１/1}"; choice="${choice//２/2}"
+  choice="${choice//３/3}"; choice="${choice//４/4}"; choice="${choice//５/5}"
+  choice="${choice//６/6}"; choice="${choice//７/7}"; choice="${choice//８/8}"; choice="${choice//９/9}"
+  choice="${choice//[[:space:]]/}"
+  printf '%s' "$choice"
+}
+read_menu_choice() {
+  local target="$1" prompt="$2" minimum="$3" maximum="$4" choice
+  while read -r -p "$prompt" choice; do
+    choice="$(normalize_menu_choice "$choice")"
+    if [[ "$choice" =~ ^[0-9]{1,2}$ ]] && (( 10#$choice >= minimum && 10#$choice <= maximum )); then
+      printf -v "$target" '%s' "$((10#$choice))"
+      return 0
+    fi
+    echo "Invalid selection; enter a number between $minimum and $maximum." >&2
+  done
+  return 1
+}
+security_tool() {
+  [[ -f "$XWARP_INSTALL_DIR/tools/$1" ]] || { echo "Clone the complete private installer repository first." >&2; return 1; }
+  local tool="$1"; shift
+  case "$tool" in
+    panel_port.py)
+      flock --nonblock /run/xwarp-maintenance.lock python3 "$XWARP_INSTALL_DIR/tools/$tool" "$@"
+      return $?
+      ;;
+    snapshot.py|upgrade.py)
+      # A client can reach SSH through the very core that this task stops.
+      # systemd owns the worker so a disconnected terminal cannot kill recovery.
+      command -v systemd-run >/dev/null && command -v flock >/dev/null || { echo "Persistent maintenance requires systemd-run and flock; no services were stopped." >&2; return 1; }
+      stage_security_runtime || return 1
+      local task_unit="xwarp-maintenance-$(date -u +%Y%m%dT%H%M%S)-$$-$RANDOM"
+      local task_log_dir="${XWARP_MAINTENANCE_LOG_DIR:-/root/xwarp-maintenance}"
+      install -d -m 700 "$task_log_dir" || return 1
+      local task_log="$task_log_dir/$task_unit.log" task_result=0
+      (umask 077; : > "$task_log") || return 1
+      local -a task_env=()
+      [[ -z "${DOCKER_CONFIG:-}" ]] || task_env+=("--setenv=DOCKER_CONFIG=$DOCKER_CONFIG")
+      echo "Maintenance task: $task_unit. It continues if SSH disconnects; log: $task_log" >&2
+      systemd-run --quiet --wait --collect --service-type=exec --unit="$task_unit" "${task_env[@]}" \
+        "--property=StandardOutput=append:$task_log" "--property=StandardError=append:$task_log" \
+        flock --nonblock /run/xwarp-maintenance.lock python3 "/opt/xwarp-install/tools/$tool" "$@" </dev/null || task_result=$?
+      if (( task_result == 0 )); then cat "$task_log"; else cat "$task_log" >&2; fi
+      return "$task_result"
+      ;;
+  esac
+  python3 "$XWARP_INSTALL_DIR/tools/$tool" "$@"
+}
+pull_immutable_image() {
+  docker pull "$1" || return 1
+  XWARP_PINNED_IMAGE="$(docker image inspect "$1" --format '{{index .RepoDigests 0}}')" || return 1
+  [[ "$XWARP_PINNED_IMAGE" =~ ^[a-z0-9./_:-]+@sha256:[a-f0-9]{64}$ ]] || { echo "Image has no registry digest; refusing a mutable container reference." >&2; return 1; }
+}
+stage_security_runtime() {
+  [[ -d "$XWARP_INSTALL_DIR/tools" && -d "$XWARP_INSTALL_DIR/systemd" ]] || { echo "Use a complete private repository checkout." >&2; return 1; }
+  if [[ "$XWARP_INSTALL_DIR" != /opt/xwarp-install ]]; then
+    install -d -m 755 /opt/xwarp-install/tools /opt/xwarp-install/systemd
+    cp "$XWARP_INSTALL_DIR"/tools/*.py /opt/xwarp-install/tools/
+    cp "$XWARP_INSTALL_DIR"/systemd/* /opt/xwarp-install/systemd/
+  fi
+}
+protect_new_core() {
+  local -a args=(--apply --ports "$trojan_panel_core_port,$grpc_port")
+  [[ -n "${XWARP_CORE_ALLOW:-}" ]] && args+=(--allow "$XWARP_CORE_ALLOW")
+  stage_security_runtime || return 1
+  security_tool firewall.py "${args[@]}" || return 1
+  umask 077
+  printf 'XWARP_CORE_FIREWALL_ARGS=--ports %s%s\n' "$trojan_panel_core_port,$grpc_port" "${XWARP_CORE_ALLOW:+ --allow $XWARP_CORE_ALLOW}" > /etc/xwarp-core-firewall.env
+  cp "$XWARP_INSTALL_DIR/systemd/xwarp-core-firewall.service" /etc/systemd/system/
+  systemctl daemon-reload
+  systemctl enable xwarp-core-firewall.service
+}
+
+show_panel_access() {
+  if [[ -f /tpdata/trojan-panel/config/gateway.json ]]; then
+    # Print only to the installer's terminal, never to a maintenance worker log.
+    security_tool panel_access.py "$@"
+  elif [[ -f "${UI_NGINX_CONFIG:-/nonexistent}" ]] && grep -Eq '^\s*server_name\s+[^; ]+;' "${UI_NGINX_CONFIG}" && ! grep -Eq '^\s*server_name\s+localhost;' "${UI_NGINX_CONFIG}"; then
+    security_tool panel_access.py --legacy-config "${UI_NGINX_CONFIG}" "$@"
+  elif [[ -n "${https_flag:-}" && -n "${domain_or_ip:-}" && -n "${trojan_panel_ui_port:-}" ]]; then
+    echo_content yellow "Web management panel address: ${https_flag}://${domain_or_ip}:${trojan_panel_ui_port}"
+    security_tool panel_access.py --credentials-only "$@"
+  fi
+}
+reviewed_upgrade() {
+  local kind="$1" digest
+  case "$kind" in
+    backend) digest="${XWARP_BACKEND_IMAGE:-}" ;;
+    ui) digest="${XWARP_UI_IMAGE:-}" ;;
+    core) digest="${XWARP_CORE_IMAGE:-}" ;;
+  esac
+  if [[ -z "$digest" ]]; then
+    read -r -p "Reviewed $kind image repository@sha256 digest: " digest || return 1
+  fi
+  security_tool upgrade.py "--${kind}-image" "$digest" --apply || return 1
+  [[ "$kind" != ui ]] || show_panel_access --existing
+}
+secure_gateway() {
+  local panel_domain panel_port subscription_port certificate private_key entry_mode knock_enabled
+  read -r -p "Panel/subscription domain: " panel_domain
+  read -r -p "Certificate absolute path: " certificate
+  read -r -p "Private key absolute path: " private_key
+  read -r -p "Panel HTTPS port (blank: mode 1 auto-random 49152-65535; otherwise keep installed port): " panel_port
+  read -r -p "Subscription HTTPS port (default 443): " subscription_port
+  read -r -p "Panel entry: 1=simple domain:port, 2=random path + key (blank: keep existing, new install uses 1): " entry_mode || return 1
+  [[ -z "$entry_mode" || "$entry_mode" == 1 || "$entry_mode" == 2 ]] || { echo "Invalid entry mode." >&2; return 1; }
+  read_menu_choice knock_enabled "Generate optional IP gate endpoint? 0=no 1=yes: " 0 1 || return 1
+  local -a args=(--panel-domain "$panel_domain" --certificate "$certificate" --private-key "$private_key" --subscription-port "${subscription_port:-443}")
+  if [[ -z "$panel_port" && "$entry_mode" == 1 ]]; then
+    args+=(--random-port)
+  elif [[ -z "$panel_port" && ! -f /tpdata/trojan-panel/config/gateway.json && -f "${UI_NGINX_CONFIG}" ]]; then
+    panel_port=$(python3 -c 'import re,sys; s=open(sys.argv[1]).read(); p=set(re.findall(r"(?m)^\s*listen\s+(?:\[::\]:)?(\d+)",s)); print(p.pop() if len(p)==1 else "")' "${UI_NGINX_CONFIG}") || return 1
+  fi
+  [[ -z "$panel_port" ]] || args+=(--panel-port "$panel_port")
+  if [[ "$entry_mode" == 1 || ( -z "$entry_mode" && ! -f /tpdata/trojan-panel/config/gateway.json ) ]]; then
+    args+=(--simple-panel)
+  elif [[ "$entry_mode" == 2 ]]; then
+    args+=(--entry-key)
+  fi
+  [[ "$knock_enabled" == 1 ]] && args+=(--knock)
+  docker inspect trojan-panel-ui --format '{{range .Mounts}}{{println .Destination}}{{end}}' | grep -qx '/etc/nginx/conf.d' || { echo "Upgrade the UI container to a directory mount before configuring the gateway." >&2; return 1; }
+  local gateway_snapshot
+  gateway_snapshot="$(security_tool snapshot.py backup --quiesce)" || return 1
+  security_tool gateway.py "${args[@]}" || { security_tool snapshot.py restore "$gateway_snapshot" --confirm "$(basename "$gateway_snapshot")"; return 1; }
+  if ! docker exec trojan-panel-ui nginx -t; then
+    echo "Generated configuration failed validation; restoring the pre-change snapshot." >&2
+    security_tool snapshot.py restore "$gateway_snapshot" --confirm "$(basename "$gateway_snapshot")"
+    return 1
+  fi
+  docker exec trojan-panel-ui nginx -s reload || return 1
+  show_panel_access
+}
+install_security_units() {
+  [[ -d "$XWARP_INSTALL_DIR/systemd" ]] || return 1
+  [[ "$XWARP_INSTALL_DIR" == /opt/xwarp-install ]] || { echo "Place the complete checkout in /opt/xwarp-install first." >&2; return 1; }
+  case "$1" in
+    timers) cp "$XWARP_INSTALL_DIR"/systemd/xwarp-health.* "$XWARP_INSTALL_DIR"/systemd/xwarp-certificates.* /etc/systemd/system/
+            systemctl daemon-reload; systemctl enable --now xwarp-health.timer xwarp-certificates.timer ;;
+    knock) [[ -f /etc/systemd/system/xwarp-core-firewall.service ]] || { echo "Configure persistent management policy with menu 29 first." >&2; return 1; }
+           systemctl enable xwarp-core-firewall.service
+           cp "$XWARP_INSTALL_DIR/systemd/xwarp-knock.service" /etc/systemd/system/
+           systemctl daemon-reload; systemctl enable --now xwarp-knock.service ;;
+  esac
+}
 
 init_var() {
   ECHO_TYPE="echo -e"
@@ -56,6 +218,7 @@ init_var() {
   # MariaDB
   MARIA_DATA="/tpdata/mariadb/"
   mariadb_ip="127.0.0.1"
+  mariadb_bind="${XWARP_MARIADB_BIND:-127.0.0.1}"
   mariadb_port=9507
   mariadb_user="root"
   mariadb_pas=""
@@ -63,6 +226,7 @@ init_var() {
   # Redis
   REDIS_DATA="/tpdata/redis/"
   redis_host="127.0.0.1"
+  redis_bind="${XWARP_REDIS_BIND:-127.0.0.1}"
   redis_port=6378
   redis_pass=""
 
@@ -71,7 +235,7 @@ init_var() {
   # Nginx
   UI_NGINX_DATA="${TROJAN_PANEL_UI_DATA}nginx/"
   UI_NGINX_CONFIG="${UI_NGINX_DATA}default.conf"
-  trojan_panel_ui_port=8888
+  trojan_panel_ui_port=""
   ui_https=1
   trojan_panel_ip="127.0.0.1"
   trojan_panel_server_port=8081
@@ -98,13 +262,14 @@ init_var() {
   trojan_panel_ui_current_version=""
   trojan_panel_ui_latest_version="v2.4.8"
   trojan_panel_current_version=""
-  trojan_panel_latest_version="v2.4.2"
+  trojan_panel_latest_version="v2.4.3"
   trojan_panel_core_current_version=""
   trojan_panel_core_latest_version="v2.3.1"
 
   # SQL
   sql_215="alter table account change validity_period preset_expire int unsigned default 0 not null comment '预设过期时长';alter table account add preset_quota bigint default 0 not null comment '预设配额' after preset_expire;update account set preset_quota = quota where last_login_time = 0;update account set quota = 0 where last_login_time = 0;alter table node add priority int default 100 not null comment '优先级' after port;INSERT INTO casbin_rule (p_type, v0, v1, v2, v3, v4, v5) VALUES ('p', 'sysadmin', '/api/account/clashSubscribeForSb', 'GET', 'default', 'default', 'default');alter table node_hysteria add server_name varchar(64) default '' not null comment '用于验证服务端证书的 hostname' after down_mbps;alter table node_hysteria add insecure tinyint(1) default 0 not null comment '忽略一切证书错误' after server_name;alter table node_hysteria add fast_open tinyint(1) default 0 not null comment '启用 Fast Open (降低连接建立延迟)' after insecure;"
   sql_230="CREATE TABLE node_hysteria2 ( id bigint(20) unsigned NOT NULL AUTO_INCREMENT COMMENT '自增主键', obfs_password varchar(64) NOT NULL DEFAULT '' COMMENT '混淆密码', up_mbps int(10) NOT NULL DEFAULT '100' COMMENT '单客户端最大上传速度 单位:Mbps', down_mbps int(10) NOT NULL DEFAULT '100' COMMENT '单客户端最大下载速度 单位:Mbps', server_name varchar(64) NOT NULL DEFAULT '' COMMENT '用于验证服务端证书的 hostname', insecure tinyint(1) NOT NULL DEFAULT '0' COMMENT '忽略一切证书错误', create_time datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间', update_time datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间', PRIMARY KEY (id) ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Hysteria2节点';INSERT INTO node_type (id, name, create_time, update_time) VALUES (5, 'hysteria2', '2022-04-01 00:00:00', '2022-04-01 00:00:00');"
+  sql_243="ALTER TABLE system MODIFY COLUMN template_config TEXT NOT NULL COMMENT '模板设置';"
 }
 
 echo_content() {
@@ -284,7 +449,11 @@ depend_install() {
     wget \
     tar \
     lsof \
-    systemd
+    systemd \
+    python3 \
+    openssl \
+    iptables \
+    ipset
 }
 
 # Install Docker
@@ -292,12 +461,7 @@ install_docker() {
   if [[ ! $(docker -v 2>/dev/null) ]]; then
     echo_content green "---> Install Docker"
 
-    # turn off firewall
-    if [[ "${release}" == "centos" ]]; then
-      systemctl disable firewalld
-    elif [[ "${release}" == "debian" || "${release}" == "ubuntu" ]]; then
-      sudo ufw disable
-    fi
+    # Preserve the host firewall; installation must not globally disable its policy.
 
     # set time zone
     timedatectl set-timezone Asia/Shanghai
@@ -693,14 +857,15 @@ install_caddy2() {
     done
 
     # Caddy2 temporary listening port for automatic certificate application
-    if [[ -n $(lsof -i:${caddy_port},${caddy_remote_port} -t) ]]; then
-      kill -9 "$(lsof -i:${caddy_port},${caddy_remote_port} -t)"
+    if lsof -nP -iTCP:"${caddy_port},${caddy_remote_port}" -sTCP:LISTEN -t >/dev/null; then
+      echo_content red "Caddy ports are already occupied. No process was stopped; choose free ports."
+      return 1
     fi
 
     docker pull caddy:2.6.2 &&
       docker run -d --name trojan-panel-caddy --restart always \
         --network=host \
-        -v "${CADDY_CONFIG}":"${CADDY_CONFIG}" \
+        -v "${CADDY_DATA}":"${CADDY_DATA}" \
         -v ${CERT_PATH}:"${CADDY_CERT_DIR}${domain}/" \
         -v ${WEB_PATH}:${WEB_PATH} \
         -v ${CADDY_LOG}:${CADDY_LOG} \
@@ -730,6 +895,7 @@ nginx_http_config() {
 server {
     listen       ${nginx_port};
     server_name  localhost;
+    access_log off;
 
     location / {
         root   ${WEB_PATH};
@@ -760,21 +926,20 @@ server {
 server {
     listen       ${nginx_remote_port} ssl;
     server_name  localhost;
+    access_log off;
 
-    # force ssl
-    ssl on;
     ssl_certificate      ${CERT_PATH}${domain}.crt;
     ssl_certificate_key  ${CERT_PATH}${domain}.key;
     # cache validity period
     ssl_session_timeout  5m;
     # secure link optional encryption protocol
-    ssl_protocols  TLSv1.3;
+    ssl_protocols  TLSv1.2 TLSv1.3;
     # encryption algorithm
     ssl_ciphers  ECDHE-RSA-AES128-GCM-SHA256:ECDHE:ECDH:AES:HIGH:!NULL:!aNULL:!MD5:!ADH:!RC4;
     # use server-side preferred algorithm
     ssl_prefer_server_ciphers  on;
 
-    #access_log  /var/log/nginx/host.access.log  main;
+    # Access logs disabled: subscription URLs contain credentials.
 
     location / {
         root   ${WEB_PATH};
@@ -931,6 +1096,7 @@ install_mariadb() {
           -e TZ=Asia/Shanghai \
           mariadb:10.7.3 \
           --port ${mariadb_port} \
+          --bind-address="${mariadb_bind}" \
           --character-set-server=utf8mb4 \
           --collation-server=utf8mb4_unicode_ci
     else
@@ -944,6 +1110,7 @@ install_mariadb() {
           -e TZ=Asia/Shanghai \
           mariadb:10.7.3 \
           --port ${mariadb_port} \
+          --bind-address="${mariadb_bind}" \
           --character-set-server=utf8mb4 \
           --collation-server=utf8mb4_unicode_ci
     fi
@@ -982,7 +1149,7 @@ install_redis() {
       docker run -d --name trojan-panel-redis --restart always \
         --network=host \
         redis:6.2.7 \
-        redis-server --requirepass "${redis_pass}" --port "${redis_port}"
+        redis-server --bind "${redis_bind}" --protected-mode yes --requirepass "${redis_pass}" --port "${redis_port}"
 
     if [[ -n $(docker ps -q -f "name=^trojan-panel-redis$" -f "status=running") ]]; then
       echo_content skyBlue "---> Redis installation completed"
@@ -1001,7 +1168,8 @@ ui_http_config() {
   cat >${UI_NGINX_CONFIG} <<-EOF
 server {
     listen       ${trojan_panel_ui_port};
-    server_name  localhost;
+    server_name  ${domain:-localhost};
+    access_log off;
 
     location / {
         root   ${TROJAN_PANEL_UI_DATA};
@@ -1009,6 +1177,8 @@ server {
     }
 
     location /api {
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$remote_addr;
         proxy_pass http://${trojan_panel_ip}:${trojan_panel_server_port};
     }
 
@@ -1027,22 +1197,21 @@ ui_https_config() {
   cat >${UI_NGINX_CONFIG} <<-EOF
 server {
     listen       ${trojan_panel_ui_port} ssl;
-    server_name  localhost;
+    server_name  ${ui_panel_host:-${domain}};
+    access_log off;
 
-    # force ssl
-    ssl on;
     ssl_certificate      ${CERT_PATH}${domain}.crt;
     ssl_certificate_key  ${CERT_PATH}${domain}.key;
     # cache validity period
     ssl_session_timeout  5m;
     # secure link optional encryption protocol
-    ssl_protocols  TLSv1.3;
+    ssl_protocols  TLSv1.2 TLSv1.3;
     # encryption algorithm
     ssl_ciphers  ECDHE-RSA-AES128-GCM-SHA256:ECDHE:ECDH:AES:HIGH:!NULL:!aNULL:!MD5:!ADH:!RC4;
     # use server-side preferred algorithm
     ssl_prefer_server_ciphers  on;
 
-    #access_log  /var/log/nginx/host.access.log  main;
+    # Access logs disabled: subscription URLs contain credentials.
 
     location / {
         root   ${TROJAN_PANEL_UI_DATA};
@@ -1050,6 +1219,8 @@ server {
     }
 
     location /api {
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$remote_addr;
         proxy_pass http://${trojan_panel_ip}:${trojan_panel_server_port};
     }
 
@@ -1069,6 +1240,7 @@ EOF
 
 # Install XWarp Frontend
 install_trojan_panel_ui() {
+  local ui_panel_host=""
   if [[ -z $(docker ps -a -q -f "name=^trojan-panel-ui$") ]]; then
     echo_content green "---> Install XWarp Frontend"
 
@@ -1077,15 +1249,25 @@ install_trojan_panel_ui() {
     read -r -p "Please enter the service port of the XWarp Backend (default: 8081): " trojan_panel_server_port
     [[ -z "${trojan_panel_server_port}" ]] && trojan_panel_server_port=8081
 
-    read -r -p "Please enter the port of the XWarp Frontend (default: 8888): " trojan_panel_ui_port
-    [[ -z "${trojan_panel_ui_port}" ]] && trojan_panel_ui_port="8888"
+    local requested_panel_port
+    read -r -p "Panel port (blank: random available high port 49152-65535): " requested_panel_port || return 1
+    local -a panel_port_args=()
+    [[ -z "$requested_panel_port" ]] || panel_port_args+=(--port "$requested_panel_port")
+    trojan_panel_ui_port=$(security_tool ports.py "${panel_port_args[@]}") || return 1
+    echo_content yellow "Panel TCP port: ${trojan_panel_ui_port}. Allow this port in your cloud firewall if enabled."
     while read -r -p "Please choose whether to enable https on the XWarp Frontend? (0/off 1/on default: 1): " ui_https; do
       if [[ -z ${ui_https} || ${ui_https} == 1 ]]; then
         install_custom_cert "custom_cert"
         domain=$(cat "${DOMAIN_FILE}")
+        if [[ "$domain" == custom_cert ]]; then
+          read -r -p "Public domain matching the uploaded certificate: " ui_panel_host || return 1
+          [[ "$ui_panel_host" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || { echo "Invalid public hostname." >&2; return 1; }
+        fi
         ui_https_config
         break
       elif [[ ${ui_https} == 0 ]]; then
+        read -r -p "Public domain or IPv4 address for the panel login URL: " domain || return 1
+        [[ "$domain" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || { echo "Invalid public hostname." >&2; return 1; }
         ui_http_config
         break
       else
@@ -1093,12 +1275,14 @@ install_trojan_panel_ui() {
       fi
     done
 
-    docker pull ghcr.io/howellxuking/xwarp-ui &&
+    pull_immutable_image "${XWARP_UI_IMAGE:-ghcr.io/howellxuking/xwarp-ui:test}" || return 1
+    
       docker run -d --name trojan-panel-ui --restart always \
         --network=host \
-        -v "${UI_NGINX_CONFIG}":"/etc/nginx/conf.d/default.conf" \
+        -v "${UI_NGINX_DATA}":"/etc/nginx/conf.d" \
+        -v "${WEB_PATH}":"${WEB_PATH}":ro \
         -v ${CERT_PATH}:${CERT_PATH} \
-        ghcr.io/howellxuking/xwarp-ui
+        "$XWARP_PINNED_IMAGE"
 
     if [[ -n $(docker ps -q -f "name=^trojan-panel-ui$" -f "status=running") ]]; then
       echo_content skyBlue "---> XWarp Frontend installation completed"
@@ -1108,7 +1292,7 @@ install_trojan_panel_ui() {
 
       echo_content red "\n=============================================================="
       echo_content skyBlue "XWarp Frontend installed successfully"
-      echo_content yellow "Web management panel address: ${https_flag}://${domain_or_ip}:${trojan_panel_ui_port}"
+      show_panel_access
       echo_content red "\n=============================================================="
     else
       echo_content red "---> XWarp Frontend installation fails or runs abnormally, please try to repair or uninstall and reinstall"
@@ -1116,6 +1300,7 @@ install_trojan_panel_ui() {
     fi
   else
     echo_content skyBlue "---> You have installed the XWarp Frontend"
+    show_panel_access
   fi
 }
 
@@ -1157,7 +1342,8 @@ install_trojan_panel() {
 
     docker exec trojan-panel-redis redis-cli -h "${redis_host}" -p "${redis_port}" -a "${redis_pass}" -e "flushall" &>/dev/null
 
-    docker pull ghcr.io/howellxuking/xwarp &&
+    pull_immutable_image "${XWARP_BACKEND_IMAGE:-ghcr.io/howellxuking/xwarp:test}" || return 1
+    
       docker run -d --name trojan-panel --restart always \
         --network=host \
         -v ${WEB_PATH}:${TROJAN_PANEL_WEBFILE} \
@@ -1173,7 +1359,7 @@ install_trojan_panel() {
         -e "redis_port=${redis_port}" \
         -e "redis_pass=${redis_pass}" \
         -e "server_port=${trojan_panel_port}" \
-        ghcr.io/howellxuking/xwarp
+        "$XWARP_PINNED_IMAGE"
 
     if [[ -n $(docker ps -q -f "name=^trojan-panel$" -f "status=running") ]]; then
       echo_content skyBlue "---> XWarp Backend installation completed"
@@ -1182,7 +1368,7 @@ install_trojan_panel() {
       echo_content skyBlue "XWarp Backend installed successfully"
       echo_content yellow "MariaDB ${mariadb_user} password (please keep it safe): ${mariadb_pas}"
       echo_content yellow "Redis password (please keep it safe): ${redis_pass}"
-      echo_content yellow "System administrator Default username: sysadmin Default password: 123456"
+      security_tool panel_access.py --credentials-only --wait-backend-port "$trojan_panel_port" || return 1
       echo_content yellow "Please log in to the management panel to change the password in time"
       echo_content red "\n=============================================================="
     else
@@ -1236,7 +1422,9 @@ install_trojan_panel_core() {
 
     domain=$(cat "${DOMAIN_FILE}")
 
-    docker pull jonssonyan/trojan-panel-core &&
+    pull_immutable_image "${XWARP_CORE_IMAGE:-jonssonyan/trojan-panel-core}" || return 1
+    protect_new_core || return 1
+    
       docker run -d --name trojan-panel-core --restart always \
         --network=host \
         -v ${TROJAN_PANEL_CORE_DATA}bin/xray/config/:${TROJAN_PANEL_CORE_DATA}bin/xray/config/ \
@@ -1263,7 +1451,7 @@ install_trojan_panel_core() {
         -e "key_path=${CERT_PATH}${domain}.key" \
         -e "grpc_port=${grpc_port}" \
         -e "server_port=${trojan_panel_core_port}" \
-        jonssonyan/trojan-panel-core
+        "$XWARP_PINNED_IMAGE"
     if [[ -n $(docker ps -q -f "name=^trojan-panel-core$" -f "status=running") ]]; then
       echo_content skyBlue "---> XWarp Core installation completed"
     else
@@ -1290,6 +1478,9 @@ update_trojan_panel_database() {
       trojan_panel_current_version="v2.3.0"
   fi
 
+  # 可重复执行：修复旧安装中模板设置仅允许 512 字符的问题
+  docker exec trojan-panel-mariadb mysql --default-character-set=utf8 -h"${mariadb_ip}" -P"${mariadb_port}" -u"${mariadb_user}" -p"${mariadb_pas}" -Dtrojan_panel_db -e "${sql_243}" &>/dev/null
+
   echo_content skyBlue "---> XWarp database structure update completed"
 }
 
@@ -1302,178 +1493,17 @@ update_trojan_panel_core_database() {
 
 # Update XWarp Frontend
 update_trojan_panel_ui() {
-  if [[ -z $(docker ps -a -q -f "name=^trojan-panel-ui$") ]]; then
-    echo_content red "---> Please install the XWarp Frontend first"
-    exit 0
-  fi
-
-  trojan_panel_ui_current_version=$(docker exec trojan-panel-ui cat ${TROJAN_PANEL_UI_DATA}version)
-  if [[ -z "${trojan_panel_ui_current_version}" || ! "${trojan_panel_ui_current_version}" =~ ^v.* ]]; then
-    echo_content red "---> The current version does not support online updates"
-    exit 0
-  fi
-
-  echo_content yellow "Tip: The current version of the XWarp Frontend is ${trojan_panel_ui_current_version} the latest version is ${trojan_panel_ui_latest_version}"
-
-  if [[ "${trojan_panel_ui_current_version}" != "${trojan_panel_ui_latest_version}" ]]; then
-    echo_content green "---> Update XWarp Frontend"
-
-    docker rm -f trojan-panel-ui &&
-      docker rmi -f ghcr.io/howellxuking/xwarp-ui
-
-    docker pull ghcr.io/howellxuking/xwarp-ui &&
-      docker run -d --name trojan-panel-ui --restart always \
-        --network=host \
-        -v "${UI_NGINX_CONFIG}":"/etc/nginx/conf.d/default.conf" \
-        -v ${CERT_PATH}:${CERT_PATH} \
-        ghcr.io/howellxuking/xwarp-ui
-
-    if [[ -n $(docker ps -q -f "name=^trojan-panel-ui$" -f "status=running") ]]; then
-      echo_content skyBlue "---> XWarp Frontend update completed"
-    else
-      echo_content red "---> XWarp Frontend update fails or runs abnormally, please try to repair or uninstall and reinstall"
-    fi
-  else
-    echo_content skyBlue "---> You have installed the latest version of the XWarp Frontend"
-  fi
+  reviewed_upgrade ui
 }
 
 # Update XWarp Backend
 update_trojan_panel() {
-  if [[ -z $(docker ps -a -q -f "name=^trojan-panel$") ]]; then
-    echo_content red "---> Please install the XWarp Backend first"
-    exit 0
-  fi
-
-  trojan_panel_current_version=$(docker exec trojan-panel ./trojan-panel -version)
-  if [[ -z "${trojan_panel_current_version}" || ! "${trojan_panel_current_version}" =~ ^v.* || ! $(version_ge "${trojan_panel_current_version}" "v2.1.4") ]]; then
-    echo_content red "---> The current version does not support online updates"
-    exit 0
-  fi
-
-  echo_content yellow "Tip: The current version of the XWarp Backend is ${trojan_panel_current_version} The latest version is ${trojan_panel_latest_version}"
-
-  if [[ "${trojan_panel_current_version}" != "${trojan_panel_latest_version}" ]]; then
-    echo_content green "---> Update XWarp Backend"
-
-    mariadb_ip=$(get_ini_value ${trojan_panel_config_path} mysql.host)
-    mariadb_port=$(get_ini_value ${trojan_panel_config_path} mysql.port)
-    mariadb_user=$(get_ini_value ${trojan_panel_config_path} mysql.user)
-    mariadb_pas=$(get_ini_value ${trojan_panel_config_path} mysql.password)
-    redis_host=$(get_ini_value ${trojan_panel_config_path} redis.host)
-    redis_port=$(get_ini_value ${trojan_panel_config_path} redis.port)
-    redis_pass=$(get_ini_value ${trojan_panel_config_path} redis.password)
-    trojan_panel_port=$(get_ini_value ${trojan_panel_config_path} server.port)
-
-    update_trojan_panel_database
-
-    docker exec trojan-panel-redis redis-cli -h "${redis_host}" -p "${redis_port}" -a "${redis_pass}" -e "flushall" &>/dev/null
-
-    docker rm -f trojan-panel &&
-      docker rmi -f ghcr.io/howellxuking/xwarp
-
-    docker pull ghcr.io/howellxuking/xwarp &&
-      docker run -d --name trojan-panel --restart always \
-        --network=host \
-        -v ${WEB_PATH}:${TROJAN_PANEL_WEBFILE} \
-        -v ${TROJAN_PANEL_LOGS}:${TROJAN_PANEL_LOGS} \
-        -v ${TROJAN_PANEL_CONFIG}:${TROJAN_PANEL_CONFIG} \
-        -v /etc/localtime:/etc/localtime \
-        -e GIN_MODE=release \
-        -e "mariadb_ip=${mariadb_ip}" \
-        -e "mariadb_port=${mariadb_port}" \
-        -e "mariadb_user=${mariadb_user}" \
-        -e "mariadb_pas=${mariadb_pas}" \
-        -e "redis_host=${redis_host}" \
-        -e "redis_port=${redis_port}" \
-        -e "redis_pass=${redis_pass}" \
-        -e "server_port=${trojan_panel_port}" \
-        ghcr.io/howellxuking/xwarp
-
-    if [[ -n $(docker ps -q -f "name=^trojan-panel$" -f "status=running") ]]; then
-      echo_content skyBlue "---> XWarp backend update completed"
-    else
-      echo_content red "---> XWarp Backend update fails or runs abnormally, please try to repair or uninstall and reinstall"
-    fi
-  else
-    echo_content skyBlue "---> You have installed the latest version of the XWarp Backend"
-  fi
+  reviewed_upgrade backend
 }
 
 # Update XWarp Core
 update_trojan_panel_core() {
-  if [[ -z $(docker ps -a -q -f "name=^trojan-panel-core$") ]]; then
-    echo_content red "---> Please install the XWarp Core first"
-    exit 0
-  fi
-
-  trojan_panel_core_current_version=$(docker exec trojan-panel-core ./trojan-panel-core -version)
-  if [[ -z "${trojan_panel_core_current_version}" || ! "${trojan_panel_core_current_version}" =~ ^v.* || ! $(version_ge "${trojan_panel_core_current_version}" "v2.1.1") ]]; then
-    echo_content red "---> The current version does not support online updates"
-    exit 0
-  fi
-
-  echo_content yellow "Tip: The current version of the XWarp Core is ${trojan_panel_core_current_version} The latest version is ${trojan_panel_core_latest_version}"
-
-  if [[ "${trojan_panel_core_current_version}" != "${trojan_panel_core_latest_version}" ]]; then
-    echo_content green "---> Update XWarp Core"
-
-    mariadb_ip=$(get_ini_value ${trojan_panel_core_config_path} mysql.host)
-    mariadb_port=$(get_ini_value ${trojan_panel_core_config_path} mysql.port)
-    mariadb_user=$(get_ini_value ${trojan_panel_core_config_path} mysql.user)
-    mariadb_pas=$(get_ini_value ${trojan_panel_core_config_path} mysql.password)
-    redis_host=$(get_ini_value ${trojan_panel_core_config_path} redis.host)
-    redis_port=$(get_ini_value ${trojan_panel_core_config_path} redis.port)
-    redis_pass=$(get_ini_value ${trojan_panel_core_config_path} redis.password)
-    grpc_port=$(get_ini_value ${trojan_panel_core_config_path} grpc.port)
-    trojan_panel_core_port=$(get_ini_value ${trojan_panel_core_config_path} server.port)
-
-    update_trojan_panel_core_database
-
-    docker exec trojan-panel-redis redis-cli -h "${redis_host}" -p "${redis_port}" -a "${redis_pass}" -e "flushall" &>/dev/null
-
-    docker rm -f trojan-panel-core &&
-      docker rmi -f jonssonyan/trojan-panel-core
-
-    domain=$(cat "${DOMAIN_FILE}")
-
-    docker pull jonssonyan/trojan-panel-core &&
-      docker run -d --name trojan-panel-core --restart always \
-        --network=host \
-        -v ${TROJAN_PANEL_CORE_DATA}bin/xray/config/:${TROJAN_PANEL_CORE_DATA}bin/xray/config/ \
-        -v ${TROJAN_PANEL_CORE_DATA}bin/trojango/config/:${TROJAN_PANEL_CORE_DATA}bin/trojango/config/ \
-        -v ${TROJAN_PANEL_CORE_DATA}bin/hysteria/config/:${TROJAN_PANEL_CORE_DATA}bin/hysteria/config/ \
-        -v ${TROJAN_PANEL_CORE_DATA}bin/naiveproxy/config/:${TROJAN_PANEL_CORE_DATA}bin/naiveproxy/config/ \
-        -v ${TROJAN_PANEL_CORE_DATA}bin/hysteria2/config/:${TROJAN_PANEL_CORE_DATA}bin/hysteria2/config/ \
-        -v ${TROJAN_PANEL_CORE_LOGS}:${TROJAN_PANEL_CORE_LOGS} \
-        -v ${TROJAN_PANEL_CORE_CONFIG}:${TROJAN_PANEL_CORE_CONFIG} \
-        -v ${CERT_PATH}:${CERT_PATH} \
-        -v ${WEB_PATH}:${WEB_PATH} \
-        -v /etc/localtime:/etc/localtime \
-        -e GIN_MODE=release \
-        -e "mariadb_ip=${mariadb_ip}" \
-        -e "mariadb_port=${mariadb_port}" \
-        -e "mariadb_user=${mariadb_user}" \
-        -e "mariadb_pas=${mariadb_pas}" \
-        -e "database=${database}" \
-        -e "account-table=${account_table}" \
-        -e "redis_host=${redis_host}" \
-        -e "redis_port=${redis_port}" \
-        -e "redis_pass=${redis_pass}" \
-        -e "crt_path=${CERT_PATH}${domain}.crt" \
-        -e "key_path=${CERT_PATH}${domain}.key" \
-        -e "grpc_port=${grpc_port}" \
-        -e "server_port=${trojan_panel_core_port}" \
-        jonssonyan/trojan-panel-core
-
-    if [[ -n $(docker ps -q -f "name=^trojan-panel-core$" -f "status=running") ]]; then
-      echo_content skyBlue "---> XWarp Core update completed"
-    else
-      echo_content red "---> XWarp Core update fails or runs abnormally, please try to repair or uninstall and reinstall"
-    fi
-  else
-    echo_content skyBlue "---> You have installed the latest version of the XWarp Core"
-  fi
+  reviewed_upgrade core
 }
 
 # Uninstall Caddy2+https
@@ -1538,7 +1568,7 @@ uninstall_trojan_panel_ui() {
     echo_content green "---> Uninstall XWarp Frontend"
 
     docker rm -f trojan-panel-ui &&
-      docker rmi -f ghcr.io/howellxuking/xwarp-ui &&
+      docker rmi -f ghcr.io/howellxuking/xwarp-ui:test &&
       rm -rf ${TROJAN_PANEL_UI_DATA}
 
     echo_content skyBlue "---> XWarp Frontend uninstallation completed"
@@ -1553,7 +1583,7 @@ uninstall_trojan_panel() {
     echo_content green "---> Uninstall XWarp Backend"
 
     docker rm -f trojan-panel &&
-      docker rmi -f ghcr.io/howellxuking/xwarp &&
+      docker rmi -f ghcr.io/howellxuking/xwarp:test &&
       rm -rf ${TROJAN_PANEL_DATA}
 
     echo_content skyBlue "---> XWarp Backend uninstallation completed"
@@ -1582,7 +1612,7 @@ uninstall_all() {
   echo_content green "---> Uninstall all XWarp related containers"
 
   docker rm -f $(docker ps -a -q -f "name=^trojan-panel")
-  docker rmi -f $(docker images | grep "^ghcr.io/howellxuking/xwarp" | awk '{print $3}')
+  docker rmi -f $(docker images | grep "^ghcr.io/howellxuking/xwarp:test" | awk '{print $3}')
   rm -rf ${TP_DATA}
 
   echo_content skyBlue "---> Uninstall all XWarp related containers completed"
@@ -1590,43 +1620,27 @@ uninstall_all() {
 
 # Modify XWarp Frontend port
 update_trojan_panel_ui_port() {
-  if [[ -n $(docker ps -q -f "name=^trojan-panel-ui$" -f "status=running") ]]; then
-    echo_content green "---> Modify XWarp Frontend port"
-
-    trojan_panel_ui_port=$(grep 'listen.*ssl' ${UI_NGINX_CONFIG} | awk '{print $2}')
-    if [[ -z "${trojan_panel_ui_port}" ]]; then
-      ui_https=0
-      trojan_panel_ui_port=$(grep -oP 'listen\s+\K\d+' ${UI_NGINX_CONFIG} | awk 'NR==1')
-    fi
-    if [[ -z "${trojan_panel_ui_port}" ]]; then
-      echo_content red "---> XWarp Frontend port not queried"
-      exit 0
-    fi
-    echo_content yellow "Tip: The current port of the XWarp Frontend is ${trojan_panel_ui_port}"
-
-    read -r -p "Please enter the new port of the XWarp Frontend (default: 8888): " trojan_panel_ui_port
-    [[ -z "${trojan_panel_ui_port}" ]] && trojan_panel_ui_port="8888"
-
-    if [[ ${ui_https} == 0 ]]; then
-      # http
-      sed -i "s/listen.*;/listen       ${trojan_panel_ui_port};/g" ${UI_NGINX_CONFIG} &&
-        sed -i "s/http:\/\/\$host:.*\$request_uri;/http:\/\/\$host:${trojan_panel_ui_port}\$request_uri;/g" ${UI_NGINX_CONFIG} &&
-        docker restart trojan-panel-ui
-    else
-      # https
-      sed -i "s/listen.*ssl;/listen       ${trojan_panel_ui_port} ssl;/g" ${UI_NGINX_CONFIG} &&
-        sed -i "s/https:\/\/\$host:.*\$request_uri;/https:\/\/\$host:${trojan_panel_ui_port}\$request_uri;/g" ${UI_NGINX_CONFIG} &&
-        docker restart trojan-panel-ui
-    fi
-
-    if [[ "$?" == "0" ]]; then
-      echo_content skyBlue "---> XWarp Frontend port modification completed"
-    else
-      echo_content red "---> XWarp Frontend port modification failed"
-    fi
-  else
-    echo_content red "---> The XWarp Frontend is not installed or is running abnormally, please repair or uninstall and reinstall and try again"
+  if [[ -z $(docker ps -q -f "name=^trojan-panel-ui$" -f "status=running") ]]; then
+    echo_content red "面板未运行，请先修复或安装面板。"
+    return 1
   fi
+  local new_panel_port legacy_host
+  local -a args=()
+  read -r -p "请输入新的面板端口（留空自动选择随机高位端口）：" new_panel_port || return 1
+  new_panel_port="$(normalize_menu_choice "$new_panel_port")"
+  if [[ -z "$new_panel_port" ]]; then
+    args+=(--random)
+  elif [[ "$new_panel_port" =~ ^[0-9]{1,5}$ ]]; then
+    args+=(--port "$((10#$new_panel_port))")
+  else
+    echo_content red "端口必须是 1–65535 之间的数字。"
+    return 1
+  fi
+  if [[ ! -f /tpdata/trojan-panel/config/gateway.json ]]; then
+    read -r -p "请输入当前面板域名或 IP（用于显示新登录地址）：" legacy_host || return 1
+    args+=(--host "$legacy_host")
+  fi
+  security_tool panel_port.py "${args[@]}"
 }
 
 # Refresh Redis cache
@@ -1695,75 +1709,10 @@ change_cert() {
   fi
 }
 
-# Forgot sysadmin password
+# Recovery affects only administrator login/MFA, never node credentials.
 forget_pass() {
-  while :; do
-    echo_content yellow "1. Query MariaDB password"
-    echo_content yellow "2. Query Redis password"
-    echo_content yellow "3. Reset the username and password of the admin panel system administrator"
-    echo_content yellow "4. Quit"
-    read -r -p "Please choose (default: 4): " forget_pass_option
-    [[ -z "${forget_pass_option}" ]] && forget_pass_option=4
-    case ${forget_pass_option} in
-    1)
-      if [[ -n $(docker ps -a -q -f "name=^trojan-panel$") ]]; then
-        mariadb_user=$(get_ini_value ${trojan_panel_config_path} mysql.user)
-        mariadb_pas=$(get_ini_value ${trojan_panel_config_path} mysql.password)
-        echo_content red "\n=============================================================="
-        echo_content yellow "MariaDB ${mariadb_user} password (please keep it safe): ${mariadb_pas}"
-        echo_content red "\n=============================================================="
-      else
-        echo_content red "---> Please execute on the XWarp backend server"
-      fi
-      ;;
-    2)
-      if [[ -n $(docker ps -a -q -f "name=^trojan-panel$") ]]; then
-        redis_pass=$(get_ini_value ${trojan_panel_config_path} redis.password)
-        echo_content red "\n=============================================================="
-        echo_content yellow "Redis password (please keep it safe): ${redis_pass}"
-        echo_content red "\n=============================================================="
-      else
-        echo_content red "---> Please execute on the XWarp backend server"
-      fi
-      ;;
-    3)
-      if [[ -n $(docker ps -a -q -f "name=^trojan-panel-mariadb$") ]]; then
-        read -r -p "Please enter the IP address of MariaDB (default: local host): " mariadb_ip
-        [[ -z "${mariadb_ip}" ]] && mariadb_ip="127.0.0.1"
-        read -r -p "Please enter the port of MariaDB (default: 9507): " mariadb_port
-        [[ -z "${mariadb_port}" ]] && mariadb_port=9507
-        read -r -p "Please enter the username of MariaDB (default: root): " mariadb_user
-        [[ -z "${mariadb_user}" ]] && mariadb_user="root"
-        while read -r -p "Please enter the password of MariaDB (required): " mariadb_pas; do
-          if [[ -z "${mariadb_pas}" ]]; then
-            echo_content red "Password can not be empty"
-          else
-            break
-          fi
-        done
-
-        docker exec trojan-panel-mariadb mysql --default-character-set=utf8 -h"${mariadb_ip}" -P"${mariadb_port}" -u"${mariadb_user}" -p"${mariadb_pas}" -Dtrojan_panel_db -e "update account set username = 'sysadmin',pass = 'tFjD2X1F6i9FfWp2GDU5Vbi1conuaChDKIYbw9zMFrqvMoSz',hash='4366294571b8b267d9cf15b56660f0a70659568a86fc270a52fdc9e5',deleted = 0 where id = 1 limit 1"
-        if [[ "$?" == "0" ]]; then
-          echo_content red "\n=============================================================="
-          echo_content yellow "System administrator Default username: sysadmin Default password: 123456"
-          echo_content yellow "Please log in to the management panel to change the password in time"
-          echo_content red "\n=============================================================="
-        else
-          echo_content red "Admin panel sysadmin username and password reset failed"
-        fi
-      else
-        echo_content red "---> Please execute on the MariaDB server"
-      fi
-      ;;
-    4)
-      break
-      ;;
-    *)
-      echo_content red "No such option"
-      continue
-      ;;
-    esac
-  done
+  docker exec trojan-panel ./trojan-panel -resetAdminPassword || return 1
+  echo_content yellow "Read the recovered-admin-*.txt file locally under /tpdata/trojan-panel/config; login with the existing administrator name. Remove the file after changing the password."
 }
 
 # Fault detection
@@ -1878,8 +1827,8 @@ main() {
   depend_install
   clear
   echo_content red "\n=============================================================="
-  echo_content skyBlue "System Required: CentOS 7+/Ubuntu 18+/Debian 10+"
-  echo_content skyBlue "Version: v2.3.4"
+  echo_content skyBlue "Private security tools: Debian 11+/Ubuntu 20.04+, Python 3.8+, Docker, systemd"
+  echo_content skyBlue "Version: v2.5.0"
   echo_content skyBlue "Description: One click Install XWarp server"
   echo_content skyBlue "Author: jonssonyan <https://jonssonyan.com>"
   echo_content skyBlue "Github: https://github.com/howellxuKing"
@@ -1914,7 +1863,15 @@ main() {
   echo_content yellow "23. Fault detection"
   echo_content yellow "24. Log query"
   echo_content yellow "25. Version query"
-  read -r -p "Please choose: " selectInstall_type
+  echo_content yellow "26. Configure private HTTPS gateway"
+  echo_content yellow "27. Consistent database/config/image backup"
+  echo_content yellow "28. Restore a reviewed backup"
+  echo_content yellow "29. Restrict core management TCP ports"
+  echo_content yellow "30. Server health report"
+  echo_content yellow "31. Install health/certificate timers"
+  echo_content yellow "32. Enable optional 12-hour panel IP gate"
+  echo_content yellow "0. Quit"
+  read_menu_choice selectInstall_type "Please choose (0=quit): " 0 32 || return 0
   case ${selectInstall_type} in
   1)
     install_docker
@@ -1951,13 +1908,13 @@ main() {
     install_redis
     ;;
   8)
-    update_trojan_panel_ui
+    reviewed_upgrade ui
     ;;
   9)
-    update_trojan_panel
+    reviewed_upgrade backend
     ;;
   10)
-    update_trojan_panel_core
+    reviewed_upgrade core
     ;;
   11)
     uninstall_trojan_panel_ui
@@ -1996,7 +1953,7 @@ main() {
     forget_pass
     ;;
   23)
-    failure_testing
+    security_tool diagnostics.py
     ;;
   24)
     log_query
@@ -2004,10 +1961,32 @@ main() {
   25)
     version_query
     ;;
-  *)
-    echo_content red "No such option"
-    ;;
+  26) secure_gateway ;;
+  27) security_tool snapshot.py backup --quiesce ;;
+  28) read -r -p "Backup archive absolute path: " snapshot_archive
+      read -r -p "Confirm by typing the exact archive filename: " snapshot_confirm
+      security_tool snapshot.py restore "$snapshot_archive" --confirm "$snapshot_confirm" ;;
+  29) read -r -p "Core management ports (default 8082,8100): " security_ports
+      read -r -p "Allowed backend IP/CIDR (empty = local only): " security_peer
+      local -a security_args=(--apply --ports "${security_ports:-8082,8100}")
+      [[ -n "$security_peer" ]] && security_args+=(--allow "$security_peer")
+      security_tool firewall.py "${security_args[@]}" || return 1
+      if [[ "$XWARP_INSTALL_DIR" == /opt/xwarp-install ]]; then
+        umask 077
+        printf 'XWARP_CORE_FIREWALL_ARGS=--ports %s%s\n' "${security_ports:-8082,8100}" "${security_peer:+ --allow $security_peer}" > /etc/xwarp-core-firewall.env
+        cp "$XWARP_INSTALL_DIR/systemd/xwarp-core-firewall.service" /etc/systemd/system/
+        systemctl daemon-reload; systemctl enable xwarp-core-firewall.service
+      else
+        echo "Policy applied for this boot. Place checkout in /opt/xwarp-install and repeat to persist it."
+      fi ;;
+  30) security_tool diagnostics.py ;;
+  31) install_security_units timers ;;
+  32) install_security_units knock ;;
+  0) return 0 ;;
+  *) echo_content red "No such option" ;;
   esac
 }
 
-main
+if [[ "${XWARP_SOURCE_ONLY:-0}" != "1" ]]; then
+  main
+fi

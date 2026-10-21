@@ -1,76 +1,28 @@
-<div align="center">
-<img src="https://raw.githubusercontent.com/howellxuKing/xwarp-ui/main/public/logo.png" width="120" alt="XWarp" />
-<h1>XWarp</h1>
-<p>XWarp 一键安装脚本 —— 一条命令部署面板（后端 / 前端 / 内核 / 证书 / 伪装站）</p>
-</div>
+# XWarp 公开稳定版
 
-当前脚本版本：**v2.4.0**。
-
-## 支持系统
-
-CentOS 7+ / Ubuntu 18+ / Debian 10+（x86_64 / arm64）
-
-## 一键安装
+一条命令进入安装向导，不需要 GitHub 账号、Token、手动克隆仓库或 Docker 登录。
 
 ```bash
-source <(curl -L https://raw.githubusercontent.com/howellxuKing/xwarp-install/main/install_script.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/howellxuKing/xwarp-install/main/install_script.sh)
 ```
 
-按提示依次选择：
+在 Debian/Ubuntu x86_64 服务器的 root 终端运行。首次需要访问 GitHub、GHCR 和系统软件源；建议至少 1 GB 内存，安装前保留数据备份。
 
-| 选项 | 功能 |
-|---|---|
-| **1** | 安装 XWarp 前端 UI（Nginx + 证书 + 伪装站） |
-| **2** | 安装 XWarp 后端 API |
-| **3** | 安装 XWarp Core（代理内核：Xray / Trojan-Go / Hysteria / Hysteria2 / NaiveProxy） |
-| **8 / 9** | 更新 前端 / 后端 |
-| **22** | 重置管理员密码 |
+## 安装与使用
 
-安装完成后访问 `https://你的域名:8888`，默认账号 `sysadmin`。
+- 新服务器按菜单 **2 后端 → 3 核心 → 1 前端** 安装，完成一个组件后可继续选择下一个。
+- 前端端口留空，由脚本自动从 **49152～65535** 选择空闲端口，安装后保持不变。
+- HTTPS 独立订阅和简洁入口使用菜单 **26**；填写域名及对应证书文件，面板端口留空、入口模式选 **1**，自动生成高位随机端口。订阅默认使用 443。
+- 安装后红色醒目区域显示完整登录地址。新安装显示初始管理员账号和随机密码；已有账号密码不会重置。请保存显示的地址和密码。
+- 云防火墙启用时，放行最终显示的面板 TCP 端口，以及实际节点需要的 TCP/UDP 端口。
+- 使用现有安装时，先备份再进入维护；菜单 **8/9** 分别升级前端/后端，菜单 **19** 修改面板端口，菜单 **22** 重置管理员密码。
+- 备份可能短暂停止节点；SSH 如果经由这些节点也可能断开。后台维护任务会继续，重连后检查任务日志，不要重复执行。
+- 同步公开版代码或升级不需要重置服务器。重装系统会删除原有数据，需另行备份。
 
-## 安装内容
+## 发布与开发
 
-- XWarp UI：`ghcr.io/howellxuking/xwarp-ui`
-- XWarp Backend：`ghcr.io/howellxuking/xwarp`
-- Core（内核）：`jonssonyan/trojan-panel-core`
-- Nginx / Caddy2（证书 + 伪装） / MariaDB / Redis
+后端：[xwarp](https://github.com/howellxuKing/xwarp)；前端：[xwarp-ui](https://github.com/howellxuKing/xwarp-ui)。安装使用 `release.json` 固定镜像摘要，公开镜像支持匿名拉取。
 
-> 版本检查机制：后端版本与脚本内置 `latest_version` 比对，不一致才会执行更新。改代码后请同步升级版本号，否则「更新后端」会提示已是最新。
+后续开发继续在私有开发副本进行，检查通过后再同步此稳定版。公开仓库不包含真实服务器密码、入口密钥、数据库备份或证书私钥。
 
-### v2.4.0 更新说明（品牌 XWarp + 黑白双主题）
-
-在菜单依次选择 **9**（更新后端）和 **8**（更新前端）即可，无需重新安装服务器：
-
-- **品牌更名为 XWarp**：默认系统名称、浏览器标题、登录页均为 XWarp
-- **新增白天/黑夜双主题**：默认**黑夜**（纯黑 X 风格），顶部栏 ☀️/🌙 图标一键切换，选择自动记住
-- **logo 随主题切换**：黑夜用反色（白 X），白天用原色（黑 X）
-- 管理员修改过的 Clash 规则、用户数据、订阅链接均不受影响
-
-> 提示：升级后如需让侧边栏/登录页显示「XWarp」，请到 **系统设置 → 基础设置 → 系统名称** 改为 `XWarp`（已有服务器保留原系统名称，不会自动覆盖）。
-
-## 客户端接入（Clash Verge）
-
-订阅链接为 **Clash Verge** 量身定制，开箱即用：
-
-1. **下载 Clash Verge**：<https://github.com/clash-verge-rev/clash-verge-rev/releases>（Windows 选 `x64-setup.exe`，国内下载慢可挂代理）
-2. **复制订阅链接**：登录面板 → 个人中心 → 复制订阅地址
-3. **一键订阅**：Clash Verge → 「订阅」→「新建」→ 粘贴链接 → 导入即用，无需任何手动配置（订阅自动更新，无外部规则文件下载）
-4. **保持「规则模式」**（默认）：流量自动分流，国内直连、国外翻墙
-
-**内置智能分流规则（全自动，零配置）：**
-
-| 流量类型 | 走向 | 举例 |
-|---|---|---|
-| 🇨🇳 国内网站 / 电商 / 视频 | **直连 DIRECT** | 淘宝、京东、拼多多、抖音、B站、网易云、微信/QQ |
-| 🤖 国外 AI / 开发者工具 | **代理 PROXY** | ChatGPT、Claude、Gemini、OpenAI、Google、GitHub |
-| 🌍 其他国外流量 | **代理 PROXY** | YouTube、Telegram、X(Twitter)、流媒体等（兜底走代理） |
-
-**效果：同一时间、同一个 Clash，AI 翻墙 + 国内电商带货/直播满速直连，互不干扰、无需来回切换。**
-
-## 致谢
-
-基于 [trojanpanel/install-script](https://github.com/trojanpanel/install-script) 定制，感谢原作者 jonssonyan 与社区。
-
-## License
-
-MIT
+本项目基于 [Trojan Panel 安装脚本](https://github.com/trojanpanel/install-script) 修改，保留原项目许可和致谢；历史文档保存在 `README_ARCHIVE*.md` 及 `archive/`，不适合作为当前安装指引。
