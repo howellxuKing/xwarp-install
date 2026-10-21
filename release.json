@@ -3,16 +3,16 @@
   "version": "v2.5.0",
   "platform": "linux/amd64",
   "images": {
-    "backend": "ghcr.io/howellxuking/xwarp@sha256:ebbadcf5803d787df242286c9d34526b0f52ac98cd2cc63eb3e6e904151696ef",
-    "ui": "ghcr.io/howellxuking/xwarp-ui@sha256:3dc7f74c4eafbc98fef8f353cbe157f303d6145892055b2c675595a35a6c1437",
+    "backend": "ghcr.io/howellxuking/xwarp@sha256:b9e6405fb7ac9f4602e92e104af0f7aa816005a884ba8befead08877455da60e",
+    "ui": "ghcr.io/howellxuking/xwarp-ui@sha256:487df895fd03639eb156398809c89747d70e4c3fb39732dd953e88787150ef22",
     "core": "jonssonyan/trojan-panel-core@sha256:df1cbe6f2cac70bef9824b58a389dbe9fc38ea4009e4e7a5fb15973f7102913d"
   },
   "commits": {
-    "backend": "7cb15293929b75d5300958cfae1717dfe6ac01a5",
-    "ui": "cc8340d8320ef17f9c27a5a61610844934319869"
+    "backend": "f414edddc81b10322a40a6fbad1e27e36ca3a6fc",
+    "ui": "e6d43361549a9a15aaf90ffb3d0bdd688c65bad3"
   },
   "checks": {
-    "backend": "https://github.com/howellxuKing/xwarp/actions/runs/39592292437",
-    "ui": "https://github.com/howellxuKing/xwarp-ui/actions/runs/39592299508"
+    "backend": "https://github.com/howellxuKing/xwarp/actions/runs/39606786881",
+    "ui": "https://github.com/howellxuKing/xwarp-ui/actions/runs/39607041496"
   }
 }
