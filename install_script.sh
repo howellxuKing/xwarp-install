@@ -1276,7 +1276,7 @@ install_trojan_panel_ui() {
     done
 
     pull_immutable_image "${XWARP_UI_IMAGE:-ghcr.io/howellxuking/xwarp-ui:test}" || return 1
-    
+
       docker run -d --name trojan-panel-ui --restart always \
         --network=host \
         -v "${UI_NGINX_DATA}":"/etc/nginx/conf.d" \
@@ -1343,7 +1343,7 @@ install_trojan_panel() {
     docker exec trojan-panel-redis redis-cli -h "${redis_host}" -p "${redis_port}" -a "${redis_pass}" -e "flushall" &>/dev/null
 
     pull_immutable_image "${XWARP_BACKEND_IMAGE:-ghcr.io/howellxuking/xwarp:test}" || return 1
-    
+
       docker run -d --name trojan-panel --restart always \
         --network=host \
         -v ${WEB_PATH}:${TROJAN_PANEL_WEBFILE} \
@@ -1424,7 +1424,7 @@ install_trojan_panel_core() {
 
     pull_immutable_image "${XWARP_CORE_IMAGE:-jonssonyan/trojan-panel-core}" || return 1
     protect_new_core || return 1
-    
+
       docker run -d --name trojan-panel-core --restart always \
         --network=host \
         -v ${TROJAN_PANEL_CORE_DATA}bin/xray/config/:${TROJAN_PANEL_CORE_DATA}bin/xray/config/ \
