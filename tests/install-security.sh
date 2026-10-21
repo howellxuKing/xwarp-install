@@ -9,6 +9,13 @@ if env -u XWARP_TEST_MODE bash install_script.sh </dev/null > /dev/null 2>&1; th
   echo "Installer ignored the failed bootstrap download" >&2
   exit 1
 fi
+curl() { printf '%s\n' "echo PUBLIC_BOOTSTRAP_WRAPPER_OK"; }
+export -f curl
+wrapper_output=$(bash -c 'source ./install_script.sh; echo CALLER_STILL_RUNNING')
+grep -q PUBLIC_BOOTSTRAP_WRAPPER_OK <<< "$wrapper_output"
+grep -q CALLER_STILL_RUNNING <<< "$wrapper_output"
+wrapper_output=$(bash ./install_script.sh)
+grep -q PUBLIC_BOOTSTRAP_WRAPPER_OK <<< "$wrapper_output"
 unset -f curl
 
 export XWARP_TEST_MODE=1 XWARP_SOURCE_ONLY=1
