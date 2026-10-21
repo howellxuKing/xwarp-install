@@ -16,6 +16,15 @@ jobs:
           bash -n install_script.sh
           bash -n bootstrap.sh
           bash tests/install-security.sh
+      - name: Verify release images without credentials
+        shell: bash
+        run: |
+          python3 tools/release.py release.json > "$RUNNER_TEMP/xwarp-images.env"
+          source "$RUNNER_TEMP/xwarp-images.env"
+          export DOCKER_CONFIG="$(mktemp -d)"
+          docker pull "$XWARP_BACKEND_IMAGE"
+          docker pull "$XWARP_UI_IMAGE"
+          docker pull "$XWARP_CORE_IMAGE"
       - name: Backup and access-control regression checks
         run: python3 -m unittest discover -s tests -p "test_*.py" -v
       - name: Isolated HTTPS gateway acceptance

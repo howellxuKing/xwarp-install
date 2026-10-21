@@ -21,6 +21,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/howellxuKing/xwarp-install/m
 
 ## 发布与开发
 
+默认后端 API 仅监听本机。旧版升级保留实际监听范围，不能安全判断时停止升级，不自动切换监听地址。高级分布式部署可指定 `XWARP_API_BIND` 和 `XWARP_TRUSTED_PROXIES`，普通同机安装无须配置。
+
 后端：[xwarp](https://github.com/howellxuKing/xwarp)；前端：[xwarp-ui](https://github.com/howellxuKing/xwarp-ui)。安装使用 `release.json` 固定镜像摘要，公开镜像支持匿名拉取。
 
 后续开发继续在私有开发副本进行，检查通过后再同步此稳定版。公开仓库不包含真实服务器密码、入口密钥、数据库备份或证书私钥。

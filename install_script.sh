@@ -1351,6 +1351,8 @@ install_trojan_panel() {
         -v ${TROJAN_PANEL_CONFIG}:${TROJAN_PANEL_CONFIG} \
         -v /etc/localtime:/etc/localtime \
         -e GIN_MODE=release \
+        -e "XWARP_API_BIND=${XWARP_API_BIND:-127.0.0.1}" \
+        -e "XWARP_TRUSTED_PROXIES=${XWARP_TRUSTED_PROXIES:-127.0.0.1,::1}" \
         -e "mariadb_ip=${mariadb_ip}" \
         -e "mariadb_port=${mariadb_port}" \
         -e "mariadb_user=${mariadb_user}" \
