@@ -3,16 +3,16 @@
   "version": "v2.5.0",
   "platform": "linux/amd64",
   "images": {
-    "backend": "ghcr.io/howellxuking/xwarp@sha256:b9e6405fb7ac9f4602e92e104af0f7aa816005a884ba8befead08877455da60e",
+    "backend": "ghcr.io/howellxuking/xwarp@sha256:c658716c23e5520281aeb3fd9d232f2cdbf78e694515b274218f3d0bb4820f0f",
     "ui": "ghcr.io/howellxuking/xwarp-ui@sha256:487df895fd03639eb156398809c89747d70e4c3fb39732dd953e88787150ef22",
     "core": "jonssonyan/trojan-panel-core@sha256:df1cbe6f2cac70bef9824b58a389dbe9fc38ea4009e4e7a5fb15973f7102913d"
   },
   "commits": {
-    "backend": "f414edddc81b10322a40a6fbad1e27e36ca3a6fc",
+    "backend": "fb7f127c5a67d3a1258eab353e500719a7d3cd17",
     "ui": "e6d43361549a9a15aaf90ffb3d0bdd688c65bad3"
   },
   "checks": {
-    "backend": "https://github.com/howellxuKing/xwarp/actions/runs/39606786881",
+    "backend": "https://github.com/howellxuKing/xwarp/actions/runs/39713641592",
     "ui": "https://github.com/howellxuKing/xwarp-ui/actions/runs/39607041496"
   }
 }
