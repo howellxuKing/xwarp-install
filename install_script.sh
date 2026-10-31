@@ -43,6 +43,94 @@ read_menu_choice() {
   done
   return 1
 }
+
+# ---------------------------------------------------------------------------
+# Installation credentials
+#
+# The database passwords are generated once and kept in a private file, so the
+# backend, the core and any later repair all use the same value. A mismatch
+# shows up as "the panel logs in but every node is offline", the hardest
+# failure to diagnose, so no path is allowed to ask for them twice.
+# ---------------------------------------------------------------------------
+XWARP_INSTALL_ENV="${XWARP_INSTALL_ENV:-/opt/xwarp/install.env}"
+XWARP_AUTO="${XWARP_AUTO:-0}"
+XWARP_AUTO_DONE=0
+
+random_secret() {
+  local value=""
+  if command -v openssl >/dev/null 2>&1; then
+    value="$(openssl rand -base64 48 2>/dev/null | tr -dc 'A-Za-z0-9' | head -c 24)"
+  fi
+  if [[ -z "$value" ]]; then
+    value="$(head -c 64 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 24)"
+  fi
+  printf '%s' "$value"
+}
+
+load_install_env() {
+  [[ -f "$XWARP_INSTALL_ENV" ]] || return 1
+  local saved_domain="${domain-}"
+  # shellcheck disable=SC1090
+  . "$XWARP_INSTALL_ENV"
+  # The stored domain must never silently replace an answer the operator is
+  # about to type; only the passwords and the port are reused.
+  domain="$saved_domain"
+  [[ -n "${mariadb_pas:-}" && -n "${redis_pass:-}" ]] || return 1
+  return 0
+}
+
+save_install_env() {
+  install -d -m 700 "$(dirname "$XWARP_INSTALL_ENV")"
+  (
+    umask 077
+    cat >"$XWARP_INSTALL_ENV" <<EOF
+# XWarp installation credentials. Keep this file private: it is required to
+# repair, restore or migrate this server.
+mariadb_user=${mariadb_user:-root}
+mariadb_pas=${mariadb_pas}
+redis_pass=${redis_pass}
+domain=${domain}
+created=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+  )
+  chmod 600 "$XWARP_INSTALL_ENV"
+}
+
+# ask <variable> <prompt> <default>
+# Manual mode always prompts, exactly like before. Auto mode takes the current
+# value or the default without ever touching the keyboard.
+ask() {
+  local varname="$1" prompt="$2" default="$3" value=""
+  if [[ "${XWARP_AUTO}" == "1" ]]; then
+    value="${!varname-}"
+    [[ -n "$value" ]] || value="$default"
+    printf -v "$varname" '%s' "$value"
+    return 0
+  fi
+  read -r -p "$prompt" value
+  [[ -z "$value" ]] && value="${!varname-}"
+  [[ -z "$value" ]] && value="$default"
+  printf -v "$varname" '%s' "$value"
+}
+
+# ask_required <variable> <prompt> [error message]
+# Passwords only prompt when nothing was supplied by install.env or auto mode.
+ask_required() {
+  local varname="$1" prompt="$2" message="${3:-Password can not be empty}" value=""
+  if [[ -n "${!varname-}" ]]; then
+    return 0
+  fi
+  while read -r -p "$prompt" value; do
+    if [[ -z "$value" ]]; then
+      echo_content red "$message"
+    else
+      printf -v "$varname" '%s' "$value"
+      return 0
+    fi
+  done
+  return 1
+}
+
 security_tool() {
   [[ -f "$XWARP_INSTALL_DIR/tools/$1" ]] || { echo "Clone the complete private installer repository first." >&2; return 1; }
   local tool="$1"; shift
@@ -814,47 +902,29 @@ install_caddy2() {
     wget --no-check-certificate -O ${WEB_PATH}html.tar.gz -N ${STATIC_HTML} &&
       tar -zxvf ${WEB_PATH}html.tar.gz -k -C ${WEB_PATH}
 
-    read -r -p "Please enter the port of Caddy2 (default: 80): " caddy_port
-    [[ -z "${caddy_port}" ]] && caddy_port=80
-    read -r -p "Please enter the forwarding port of Caddy2 (default: 8863): " caddy_remote_port
-    [[ -z "${caddy_remote_port}" ]] && caddy_remote_port=8863
+    ask caddy_port "Please enter the port of Caddy2 (default: 80): " 80
+    ask caddy_remote_port "Please enter the forwarding port of Caddy2 (default: 8863): " 8863
 
     echo_content yellow "Tip: Please confirm that the domain name has been resolved to this machine, otherwise the installation may fail"
-    while read -r -p "Please enter your domain name (required): " domain; do
-      if [[ -z "${domain}" ]]; then
-        echo_content red "Domain name cannot be empty"
-      else
-        break
-      fi
-    done
+    ask_required domain "Please enter your domain name (required): " "Domain name cannot be empty"
 
-    read -r -p "Please enter your email (optional): " your_email
+    ask your_email "Please enter your email (optional): " ""
 
-    while read -r -p "Please choose the way to set up the certificate? (1/automatically apply for and renew the certificate 2/manually set the certificate path default: 1: " ssl_option; do
-      if [[ -z ${ssl_option} || ${ssl_option} == 1 ]]; then
-        while read -r -p "Please choose the way to apply for the certificate (1/acme 2/zerossl default: 1: " ssl_module_type; do
-          if [[ -z "${ssl_module_type}" || ${ssl_module_type} == 1 ]]; then
-            ssl_module="acme"
-            CADDY_CERT_DIR="${CERT_PATH}certificates/acme-v02.api.letsencrypt.org-directory/"
-            break
-          elif [[ ${ssl_module_type} == 2 ]]; then
-            ssl_module="zerossl"
-            CADDY_CERT_DIR="${CERT_PATH}certificates/acme.zerossl.com-v2-dv90/"
-            break
-          else
-            echo_content red "Cannot enter other characters except 1 and 2"
-          fi
-        done
-        caddy2_https_auto_config "${domain}"
-        break
-      elif [[ ${ssl_option} == 2 ]]; then
-        install_custom_cert "${domain}"
-        caddy2_https_config "${domain}"
-        break
+    ask ssl_option "Please choose the way to set up the certificate? (1/automatically apply for and renew the certificate 2/manually set the certificate path default: 1): " 1
+    if [[ "${ssl_option}" == "2" ]]; then
+      install_custom_cert "${domain}"
+      caddy2_https_config "${domain}"
+    else
+      ask ssl_module_type "Please choose the way to apply for the certificate (1/acme 2/zerossl default: 1): " 1
+      if [[ "${ssl_module_type}" == "2" ]]; then
+        ssl_module="zerossl"
+        CADDY_CERT_DIR="${CERT_PATH}certificates/acme.zerossl.com-v2-dv90/"
       else
-        echo_content red "Cannot enter other characters except 1 and 2"
+        ssl_module="acme"
+        CADDY_CERT_DIR="${CERT_PATH}certificates/acme-v02.api.letsencrypt.org-directory/"
       fi
-    done
+      caddy2_https_auto_config "${domain}"
+    fi
 
     # Caddy2 temporary listening port for automatic certificate application
     if lsof -nP -iTCP:"${caddy_port},${caddy_remote_port}" -sTCP:LISTEN -t >/dev/null; then
@@ -1014,8 +1084,7 @@ install_reverse_proxy() {
       echo_content yellow "1. Install Caddy2+https (recommend)"
       echo_content yellow "2. Install Nginx"
       echo_content yellow "3. Not install"
-      read -r -p "Please select (default: 1): " whether_install_reverse_proxy
-      [[ -z "${whether_install_reverse_proxy}" ]] && whether_install_reverse_proxy=1
+      ask whether_install_reverse_proxy "Please select (default: 1): " 1
 
       case ${whether_install_reverse_proxy} in
       1)
@@ -1048,8 +1117,7 @@ install_cert() {
     while :; do
       echo_content yellow "1. Custom certificate"
       echo_content yellow "2. Not set"
-      read -r -p "Please select (default: 1): " whether_install_cert
-      [[ -z "${whether_install_cert}" ]] && whether_install_cert=1
+      ask whether_install_cert "Please select (default: 1): " 1
 
       case ${whether_install_cert} in
       1)
@@ -1075,17 +1143,9 @@ install_mariadb() {
   if [[ -z $(docker ps -a -q -f "name=^trojan-panel-mariadb$") ]]; then
     echo_content green "---> Install MariaDB"
 
-    read -r -p "Please enter the port of MariaDB (default: 9507): " mariadb_port
-    [[ -z "${mariadb_port}" ]] && mariadb_port=9507
-    read -r -p "Please enter the username of MariaDB (default: root): " mariadb_user
-    [[ -z "${mariadb_user}" ]] && mariadb_user="root"
-    while read -r -p "Please enter the password of MariaDB (required): " mariadb_pas; do
-      if [[ -z "${mariadb_pas}" ]]; then
-        echo_content red "Password can not be empty"
-      else
-        break
-      fi
-    done
+    ask mariadb_port "Please enter the port of MariaDB (default: 9507): " 9507
+    ask mariadb_user "Please enter the username of MariaDB (default: root): " "root"
+    ask_required mariadb_pas "Please enter the password of MariaDB (required): "
 
     if [[ "${mariadb_user}" == "root" ]]; then
       docker pull mariadb:10.7.3 &&
@@ -1135,15 +1195,8 @@ install_redis() {
   if [[ -z $(docker ps -a -q -f "name=^trojan-panel-redis$") ]]; then
     echo_content green "---> Install Redis"
 
-    read -r -p "Please enter the port of Redis (default: 6378): " redis_port
-    [[ -z "${redis_port}" ]] && redis_port=6378
-    while read -r -p "Please enter the Redis password (required): " redis_pass; do
-      if [[ -z "${redis_pass}" ]]; then
-        echo_content red "Password can not be empty"
-      else
-        break
-      fi
-    done
+    ask redis_port "Please enter the port of Redis (default: 6378): " 6378
+    ask_required redis_pass "Please enter the Redis password (required): "
 
     docker pull redis:6.2.7 &&
       docker run -d --name trojan-panel-redis --restart always \
@@ -1244,36 +1297,34 @@ install_trojan_panel_ui() {
   if [[ -z $(docker ps -a -q -f "name=^trojan-panel-ui$") ]]; then
     echo_content green "---> Install XWarp Frontend"
 
-    read -r -p "Please enter the IP address of the XWarp Backend (default: local host): " trojan_panel_ip
-    [[ -z "${trojan_panel_ip}" ]] && trojan_panel_ip="127.0.0.1"
-    read -r -p "Please enter the service port of the XWarp Backend (default: 8081): " trojan_panel_server_port
-    [[ -z "${trojan_panel_server_port}" ]] && trojan_panel_server_port=8081
+    ask trojan_panel_ip "Please enter the IP address of the XWarp Backend (default: local host): " "127.0.0.1"
+    ask trojan_panel_server_port "Please enter the service port of the XWarp Backend (default: 8081): " 8081
 
-    local requested_panel_port
-    read -r -p "Panel port (blank: random available high port 49152-65535): " requested_panel_port || return 1
+    local requested_panel_port=""
+    ask requested_panel_port "Panel port (blank: random available high port 49152-65535): " ""
     local -a panel_port_args=()
     [[ -z "$requested_panel_port" ]] || panel_port_args+=(--port "$requested_panel_port")
     trojan_panel_ui_port=$(security_tool ports.py "${panel_port_args[@]}") || return 1
     echo_content yellow "Panel TCP port: ${trojan_panel_ui_port}. Allow this port in your cloud firewall if enabled."
-    while read -r -p "Please choose whether to enable https on the XWarp Frontend? (0/off 1/on default: 1): " ui_https; do
-      if [[ -z ${ui_https} || ${ui_https} == 1 ]]; then
-        install_custom_cert "custom_cert"
-        domain=$(cat "${DOMAIN_FILE}")
-        if [[ "$domain" == custom_cert ]]; then
-          read -r -p "Public domain matching the uploaded certificate: " ui_panel_host || return 1
-          [[ "$ui_panel_host" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || { echo "Invalid public hostname." >&2; return 1; }
-        fi
-        ui_https_config
-        break
-      elif [[ ${ui_https} == 0 ]]; then
-        read -r -p "Public domain or IPv4 address for the panel login URL: " domain || return 1
-        [[ "$domain" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || { echo "Invalid public hostname." >&2; return 1; }
-        ui_http_config
-        break
-      else
-        echo_content red "Cannot enter other characters except 1 and 2"
+
+    ask ui_https "Please choose whether to enable https on the XWarp Frontend? (0/off 1/on default: 1): " 1
+    case "${ui_https}" in
+    0)
+      read -r -p "Public domain or IPv4 address for the panel login URL: " domain || return 1
+      [[ "$domain" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || { echo "Invalid public hostname." >&2; return 1; }
+      ui_http_config
+      ;;
+    *)
+      ui_https=1
+      install_custom_cert "custom_cert"
+      domain=$(cat "${DOMAIN_FILE}")
+      if [[ "$domain" == custom_cert ]]; then
+        ask_required ui_panel_host "Public domain matching the uploaded certificate: " "Invalid public hostname."
+        [[ "$ui_panel_host" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || { echo "Invalid public hostname." >&2; return 1; }
       fi
-    done
+      ui_https_config
+      ;;
+    esac
 
     pull_immutable_image "${XWARP_UI_IMAGE:-ghcr.io/howellxuking/xwarp-ui:test}" || return 1
 
@@ -1309,36 +1360,18 @@ install_trojan_panel() {
   if [[ -z $(docker ps -a -q -f "name=^trojan-panel$") ]]; then
     echo_content green "---> Install XWarp Backend"
 
-    read -r -p "Please enter the service port of the XWarp Backend (default: 8081): " trojan_panel_port
-    [[ -z "${trojan_panel_port}" ]] && trojan_panel_port=8081
+    ask trojan_panel_port "Please enter the service port of the XWarp Backend (default: 8081): " 8081
 
-    read -r -p "Please enter the IP address of MariaDB (default: local host): " mariadb_ip
-    [[ -z "${mariadb_ip}" ]] && mariadb_ip="127.0.0.1"
-    read -r -p "Please enter the port of MariaDB (default: 9507): " mariadb_port
-    [[ -z "${mariadb_port}" ]] && mariadb_port=9507
-    read -r -p "Please enter the username of MariaDB (default: root): " mariadb_user
-    [[ -z "${mariadb_user}" ]] && mariadb_user="root"
-    while read -r -p "Please enter the password of MariaDB (required): " mariadb_pas; do
-      if [[ -z "${mariadb_pas}" ]]; then
-        echo_content red "Password can not be empty"
-      else
-        break
-      fi
-    done
+    ask mariadb_ip "Please enter the IP address of MariaDB (default: local host): " "127.0.0.1"
+    ask mariadb_port "Please enter the port of MariaDB (default: 9507): " 9507
+    ask mariadb_user "Please enter the username of MariaDB (default: root): " "root"
+    ask_required mariadb_pas "Please enter the password of MariaDB (required): "
 
     docker exec trojan-panel-mariadb mysql --default-character-set=utf8 -h"${mariadb_ip}" -P"${mariadb_port}" -u"${mariadb_user}" -p"${mariadb_pas}" -e "create database if not exists trojan_panel_db;" &>/dev/null
 
-    read -r -p "Please enter the IP address of Redis (default: local host): " redis_host
-    [[ -z "${redis_host}" ]] && redis_host="127.0.0.1"
-    read -r -p "Please enter the port of Redis (default: 6378): " redis_port
-    [[ -z "${redis_port}" ]] && redis_port=6378
-    while read -r -p "Please enter the Redis password (required): " redis_pass; do
-      if [[ -z "${redis_pass}" ]]; then
-        echo_content red "Password can not be empty"
-      else
-        break
-      fi
-    done
+    ask redis_host "Please enter the IP address of Redis (default: local host): " "127.0.0.1"
+    ask redis_port "Please enter the port of Redis (default: 6378): " 6378
+    ask_required redis_pass "Please enter the Redis password (required): "
 
     docker exec trojan-panel-redis redis-cli -h "${redis_host}" -p "${redis_port}" -a "${redis_pass}" -e "flushall" &>/dev/null
 
@@ -1387,40 +1420,19 @@ install_trojan_panel_core() {
   if [[ -z $(docker ps -a -q -f "name=^trojan-panel-core$") ]]; then
     echo_content green "---> Install XWarp Core"
 
-    read -r -p "Please enter the service port of the XWarp Core (default: 8082): " trojan_panel_core_port
-    [[ -z "${trojan_panel_core_port}" ]] && trojan_panel_core_port=8082
+    ask trojan_panel_core_port "Please enter the service port of the XWarp Core (default: 8082): " 8082
 
-    read -r -p "Please enter the IP address of MariaDB (default: local host): " mariadb_ip
-    [[ -z "${mariadb_ip}" ]] && mariadb_ip="127.0.0.1"
-    read -r -p "Please enter the port of MariaDB (default: 9507): " mariadb_port
-    [[ -z "${mariadb_port}" ]] && mariadb_port=9507
-    read -r -p "Please enter the username of MariaDB (default: root): " mariadb_user
-    [[ -z "${mariadb_user}" ]] && mariadb_user="root"
-    while read -r -p "Please enter the password of MariaDB (required): " mariadb_pas; do
-      if [[ -z "${mariadb_pas}" ]]; then
-        echo_content red "Password can not be empty"
-      else
-        break
-      fi
-    done
-    read -r -p "Please enter the database name (default: trojan_panel_db): " database
-    [[ -z "${database}" ]] && database="trojan_panel_db"
-    read -r -p "Please enter the user table name of the database (default: account): " account_table
-    [[ -z "${account_table}" ]] && account_table="account"
+    ask mariadb_ip "Please enter the IP address of MariaDB (default: local host): " "127.0.0.1"
+    ask mariadb_port "Please enter the port of MariaDB (default: 9507): " 9507
+    ask mariadb_user "Please enter the username of MariaDB (default: root): " "root"
+    ask_required mariadb_pas "Please enter the password of MariaDB (required): "
+    ask database "Please enter the database name (default: trojan_panel_db): " "trojan_panel_db"
+    ask account_table "Please enter the user table name of the database (default: account): " "account"
 
-    read -r -p "Please enter the IP address of Redis (default: local host): " redis_host
-    [[ -z "${redis_host}" ]] && redis_host="127.0.0.1"
-    read -r -p "Please enter the port of Redis (default: 6378): " redis_port
-    [[ -z "${redis_port}" ]] && redis_port=6378
-    while read -r -p "Please enter the Redis password (required): " redis_pass; do
-      if [[ -z "${redis_pass}" ]]; then
-        echo_content red "Password can not be empty"
-      else
-        break
-      fi
-    done
-    read -r -p "Please enter the API port (default: 8100): " grpc_port
-    [[ -z "${grpc_port}" ]] && grpc_port=8100
+    ask redis_host "Please enter the IP address of Redis (default: local host): " "127.0.0.1"
+    ask redis_port "Please enter the port of Redis (default: 6378): " 6378
+    ask_required redis_pass "Please enter the Redis password (required): "
+    ask grpc_port "Please enter the API port (default: 8100): " 8100
 
     domain=$(cat "${DOMAIN_FILE}")
 
@@ -1821,6 +1833,217 @@ version_query() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# Fully automatic installation
+#
+# Defaults to the same choices the manual menu recommends: Caddy2 with an
+# ACME certificate, random high port for the panel, HTTPS on. Anything that
+# needs a human answer is collected once, up front.
+# ---------------------------------------------------------------------------
+auto_preflight() {
+  local failed=0 resolved="" busy="" mem_mb=0 disk_gb=0
+
+  echo_content green "---> Preflight checks"
+
+  if command -v getent >/dev/null 2>&1; then
+    resolved="$(getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1; exit}')"
+  fi
+  if [[ -n "$resolved" ]]; then
+    echo_content skyBlue "    DNS: ${domain} -> ${resolved}  ok"
+  else
+    echo_content red "    DNS: ${domain} does not resolve yet"
+    echo_content yellow "    Add an A record for ${domain} pointing at this server and wait for it"
+    failed=1
+  fi
+
+  if command -v lsof >/dev/null 2>&1; then
+    busy="$(lsof -nP -iTCP:80 -sTCP:LISTEN -t 2>/dev/null | head -n1)"
+  fi
+  if [[ -n "$busy" ]]; then
+    echo_content red "    Port 80 is in use (pid ${busy}); Caddy cannot obtain a certificate"
+    echo_content yellow "    Stop that service or use the manual menu to pick another port"
+    failed=1
+  else
+    echo_content skyBlue "    Port 80: free  ok"
+  fi
+
+  mem_mb="$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo 2>/dev/null)"
+  [[ -n "$mem_mb" ]] || mem_mb=0
+  if (( mem_mb > 0 && mem_mb < 1800 )); then
+    echo_content yellow "    Memory: ${mem_mb} MB - adding a 2 GB swap file"
+    if [[ ! -f /swapfile ]]; then
+      if fallocate -l 2G /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=2048 status=none 2>/dev/null; then
+        chmod 600 /swapfile && mkswap /swapfile >/dev/null 2>&1 && swapon /swapfile 2>/dev/null
+        grep -q '^/swapfile' /etc/fstab 2>/dev/null || echo '/swapfile none swap sw 0 0' >>/etc/fstab
+      fi
+    fi
+  else
+    echo_content skyBlue "    Memory: ${mem_mb} MB  ok"
+  fi
+
+  disk_gb="$(df -P / 2>/dev/null | awk 'NR==2 {printf "%d", $4/1024/1024}')"
+  [[ -n "$disk_gb" ]] || disk_gb=0
+  if (( disk_gb > 0 && disk_gb < 5 )); then
+    echo_content red "    Disk: ${disk_gb} GB free, at least 5 GB is required"
+    failed=1
+  else
+    echo_content skyBlue "    Disk: ${disk_gb} GB free  ok"
+  fi
+
+  return $failed
+}
+
+auto_verify() {
+  local failed=0
+  echo_content green "---> Connectivity checks"
+
+  if docker exec trojan-panel-mariadb mysql -uroot -p"${mariadb_pas}" -e 'select 1' >/dev/null 2>&1; then
+    echo_content skyBlue "    MariaDB login  ok"
+  else
+    echo_content red "    MariaDB login failed - the panels would connect but stay empty"
+    failed=1
+  fi
+
+  if docker exec trojan-panel-redis redis-cli -a "${redis_pass}" ping 2>/dev/null | grep -q PONG; then
+    echo_content skyBlue "    Redis login  ok"
+  else
+    echo_content red "    Redis login failed"
+    failed=1
+  fi
+
+  if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:"${trojan_panel_port:-8081}" -sTCP:LISTEN -t >/dev/null 2>&1; then
+    echo_content skyBlue "    Backend API port  ok"
+  else
+    echo_content yellow "    Backend API port is not listening yet; it may still be starting"
+  fi
+
+  return $failed
+}
+
+auto_summary() {
+  local admin_pass_file="${TROJAN_PANEL_CONFIG}initial-admin-password.txt" admin_pass=""
+  [[ -f "$admin_pass_file" ]] && admin_pass="$(cat "$admin_pass_file")"
+
+  echo_content red "\n=============================================================="
+  echo_content skyBlue "XWarp installation finished"
+  echo_content red "=============================================================="
+  show_panel_access
+  echo_content yellow "Administrator user : sysadmin"
+  if [[ -n "$admin_pass" ]]; then
+    echo_content yellow "Administrator pass : ${admin_pass}"
+  else
+    echo_content yellow "Administrator pass : see ${admin_pass_file}"
+  fi
+  echo_content green "\n-- keep these, they are not shown again --"
+  echo_content yellow "MariaDB password   : ${mariadb_pas}"
+  echo_content yellow "Redis password     : ${redis_pass}"
+  echo_content yellow "Credentials file   : ${XWARP_INSTALL_ENV}"
+  echo_content red "=============================================================="
+  echo_content yellow "Change the administrator password after the first login."
+  echo_content yellow "If the panel is unreachable, allow its port in the cloud firewall."
+}
+
+maybe_reuse_install_env() {
+  [[ -f "$XWARP_INSTALL_ENV" ]] || return 0
+  load_install_env || return 0
+  echo_content yellow "---> Reusing the database passwords stored in ${XWARP_INSTALL_ENV}"
+  echo_content yellow "    Edit that file if you want different passwords."
+}
+
+run_auto_install() {
+  local auto_domain="" auto_email=""
+
+  clear
+  echo_content red "\n=============================================================="
+  echo_content skyBlue "Fully automatic installation"
+  echo_content yellow "Only the domain is required; everything else is generated."
+  echo_content red "=============================================================="
+
+  while :; do
+    read -r -p "Domain (the A record already points to this server): " auto_domain
+    auto_domain="${auto_domain//[[:space:]]/}"
+    if [[ "$auto_domain" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
+      break
+    fi
+    echo_content red "Invalid domain, try again"
+  done
+  read -r -p "Email for the certificate (optional): " auto_email
+
+  domain="$auto_domain"
+  your_email="$auto_email"
+  ssl_option=1
+  ssl_module_type=1
+
+  if load_install_env; then
+    echo_content yellow "---> Reusing the database passwords stored in ${XWARP_INSTALL_ENV}"
+  else
+    mariadb_pas="$(random_secret)"
+    redis_pass="$(random_secret)"
+    save_install_env
+    echo_content yellow "---> Database passwords generated and stored in ${XWARP_INSTALL_ENV}"
+  fi
+
+  export XWARP_AUTO=1
+
+  if ! auto_preflight; then
+    echo_content red "---> Preflight failed. Fix the item above and run again; nothing has been installed."
+    export XWARP_AUTO=0
+    return 1
+  fi
+
+  if command -v docker >/dev/null 2>&1 && [[ -n "$(docker ps -aq -f 'name=^trojan-panel' 2>/dev/null)" ]]; then
+    echo_content red "---> An existing XWarp installation was found."
+    echo_content yellow "    Automatic mode only handles a clean server; use the manual menu"
+    echo_content yellow "    (2 backend, 3 core, 1 frontend) to repair or continue."
+    export XWARP_AUTO=0
+    return 1
+  fi
+
+  install_docker || return 1
+  install_mariadb || return 1
+  install_redis || return 1
+  install_trojan_panel || return 1
+  install_reverse_proxy || return 1
+  install_cert || return 1
+  install_trojan_panel_core || return 1
+  install_trojan_panel_ui || return 1
+
+  save_install_env
+  auto_verify
+  auto_summary
+  export XWARP_AUTO=0
+  XWARP_AUTO_DONE=1
+  return 0
+}
+
+choose_install_mode() {
+  local mode=""
+  echo_content red "\n=============================================================="
+  echo_content skyBlue "XWarp installation wizard"
+  echo_content red "=============================================================="
+  echo_content yellow "1. Fully automatic (recommended)"
+  echo_content yellow "   Enter the domain only; passwords and certificates are generated."
+  echo_content yellow "2. Manual"
+  echo_content yellow "   Choose each component yourself; the usual menu."
+  while :; do
+    read -r -p "Please choose (default: 1): " mode
+    mode="$(normalize_menu_choice "${mode:-1}")"
+    case "$mode" in
+      1)
+        run_auto_install
+        return $?
+        ;;
+      2)
+        maybe_reuse_install_env
+        return 0
+        ;;
+      *)
+        echo_content red "No such option"
+        ;;
+    esac
+  done
+}
+
 main() {
   cd "$HOME" || exit 0
   init_var
@@ -1836,6 +2059,24 @@ main() {
   echo_content skyBlue "Github: https://github.com/howellxuKing"
   echo_content skyBlue "Docs: https://github.com/howellxuKing"
   echo_content red "\n=============================================================="
+
+  # A fresh server gets the install-mode choice. An existing installation goes
+  # straight to the maintenance menu, so upgrades are never interrupted.
+  local fresh_install=1
+  if command -v docker >/dev/null 2>&1; then
+    [[ -z "$(docker ps -aq -f 'name=^trojan-panel' 2>/dev/null)" ]] || fresh_install=0
+  fi
+  if [[ "$fresh_install" == "1" ]]; then
+    local mode_rc=0
+    choose_install_mode || mode_rc=$?
+    # Automatic mode finished (or stopped): there is nothing left to choose.
+    if [[ "$mode_rc" -ne 0 || "${XWARP_AUTO_DONE}" == "1" ]]; then
+      return 0
+    fi
+    clear
+    echo_content red "\n=============================================================="
+  fi
+
   echo_content yellow "1. Install XWarp Frontend"
   echo_content yellow "2. Install XWarp Backend"
   echo_content yellow "3. Install XWarp Core"
