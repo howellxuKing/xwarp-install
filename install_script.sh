@@ -15,7 +15,7 @@ if [[ "${XWARP_SOURCE_ONLY:-0}" != "1" ]]; then
 fi
 
 # Release tools: Debian/Ubuntu x86_64, Python 3, Docker, systemd
-# Version: v2.5.4
+# Version: v2.5.8
 # Description: One click Install XWarp server
 # Author: jonssonyan <https://jonssonyan.com>
 # Github: https://github.com/trojanpanel/install-script
@@ -350,7 +350,7 @@ init_var() {
   trojan_panel_ui_current_version=""
   trojan_panel_ui_latest_version="v2.4.8"
   trojan_panel_current_version=""
-  trojan_panel_latest_version="v2.5.4"
+  trojan_panel_latest_version="v2.5.8"
   trojan_panel_core_current_version=""
   trojan_panel_core_latest_version="v2.3.1"
 
